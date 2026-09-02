@@ -24,6 +24,10 @@ jobs:
         run: |
           black --check .
           flake8 --max-line-length=100 --extend-ignore=E203,W503 --exclude=.git .
+      - name: Type-check
+        # Parity with plugin-sdk's CI — the SDK ships py.typed, so catalog
+        # plugins (which authors copy as references) get type-checked too.
+        run: mypy .
       - name: Validate every plugin against the contract
         run: |
           # each catalog plugin dir must pass `minder-plugin validate`
