@@ -1,0 +1,18 @@
+# The catalog isn't a package — this file just declares dev tooling for CI/local.
+[project]
+name = "minder-plugins-catalog"
+version = "0.0.0"
+description = "The Minder plugin catalog (not a distributable package)."
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = [
+    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk",
+    "httpx>=0.27",
+    "pytest>=8",
+    "black>=24",
+    "flake8>=7",
+]
+
+[tool.black]
+line-length = 88

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: Lint
+        run: |
+          black --check .
+          flake8 --max-line-length=100 --extend-ignore=E203,W503 --exclude=.git .
+      - name: Validate every plugin against the contract
+        run: |
+          # each catalog plugin dir must pass `minder-plugin validate`
+          for d in */ ; do
+            name="${d%/}"
+            case "$name" in tests|.github) continue;; esac
+            [ -f "$name/__init__.py" ] || continue
+            echo "── validate $name ──"
+            minder-plugin validate "$name/__init__.py"
+          done
+      - name: Test the whole catalog
+        run: pytest -q
