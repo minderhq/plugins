@@ -41,6 +41,7 @@ a `--recurse-submodules` clone stays offline-friendly (see
 | Plugin | What |
 |--------|------|
 | [`frankfurter`](frankfurter) | Keyless ECB foreign-exchange rates + a `convert` AI tool. |
+| [`hackernews`](hackernews) | Keyless Hacker News top stories + a `top_stories` AI tool. |
 
 ## License
 
