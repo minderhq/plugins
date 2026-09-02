@@ -20,7 +20,13 @@ dev = [
     "pytest>=8",
     "black>=24",
     "flake8>=7",
+    "mypy>=1.8",
 ]
 
 [tool.black]
 line-length = 88
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = ["^tests/"]
