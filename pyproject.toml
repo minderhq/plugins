@@ -5,6 +5,14 @@ version = "0.0.0"
 description = "The Minder plugin catalog (not a distributable package)."
 requires-python = ">=3.11"
 
+# Not a distributable package — the plugin dirs are the content, not modules to
+# build. Tell setuptools there's nothing to package (else it errors on multiple
+# top-level packages in a flat layout). `pip install -e ".[dev]"` then just
+# installs the dev tooling below.
+[tool.setuptools]
+packages = []
+py-modules = []
+
 [project.optional-dependencies]
 dev = [
     "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk",
