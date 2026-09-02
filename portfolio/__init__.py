@@ -147,7 +147,7 @@ class PortfolioPlugin:
         return PluginMetadata(
             name="portfolio",
             version="1.0.0",
-            description="Per-user private holdings/watchlist price tracking (Yahoo, keyless) into InfluxDB.",
+            description="Per-user holdings/watchlist price tracking (Yahoo, keyless) to InfluxDB.",
             author="Minder <core@minder.local>",
             capabilities=["collect", "analyze", "prices", "per-user"],
             data_sources=["yahoo-finance"],
