@@ -33,7 +33,11 @@ class HackerNewsPlugin(PluginBase):
     }
 
     # No storage needed — headlines are fetched on demand.
-    REQUIRES = {"services": [], "optional_services": [], "bundles": []}
+    REQUIRES: dict[str, list[str]] = {
+        "services": [],
+        "optional_services": [],
+        "bundles": [],
+    }
 
     ACTIONS = frozenset({"refresh", "top_stories"})
     READ_ONLY_ACTIONS = frozenset({"top_stories"})
