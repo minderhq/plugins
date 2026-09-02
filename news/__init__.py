@@ -161,7 +161,7 @@ class NewsPlugin:
                 "properties": {
                     "feed": {
                         "type": "string",
-                        "description": "Feed name to filter to (e.g. 'hackernews', 'bbc'). Omit for all.",
+                        "description": "Feed name to filter to (e.g. 'hackernews'). Omit for all.",
                     },
                     "limit": {
                         "type": "integer",
