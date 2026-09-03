@@ -1,0 +1,525 @@
+{
+  "source": "minderhq/plugins",
+  "count": 8,
+  "plugins": [
+    {
+      "package": "crypto",
+      "name": "crypto",
+      "version": "2.0.0",
+      "description": "Backfills daily crypto close prices (Yahoo, keyless) into InfluxDB.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "CRYPTO_SYMBOLS": {
+            "type": "string",
+            "default": "BTC-USD,ETH-USD",
+            "description": "Yahoo symbols to backfill, comma-separated (e.g. BTC-USD,ETH-USD)."
+          },
+          "CRYPTO_START_DATE": {
+            "type": "string",
+            "default": "",
+            "description": "ISO date to backfill from when empty; blank = earliest available."
+          },
+          "CRYPTO_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write the price series to InfluxDB."
+          }
+        }
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_crypto_price",
+            "description": "Get the latest daily close price of a cryptocurrency (e.g. bitcoin, ethereum, or a Yahoo symbol like BTC-USD).",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "coin": {
+                  "type": "string",
+                  "description": "Coin name/symbol, e.g. 'bitcoin', 'ETH-USD'."
+                }
+              },
+              "required": [
+                "coin"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {}
+    },
+    {
+      "package": "frankfurter",
+      "name": "frankfurter",
+      "version": "1.0.0",
+      "description": "Keyless ECB foreign-exchange rates + a convert tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [
+          "influxdb"
+        ],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "FX_BASE": {
+            "type": "string",
+            "default": "EUR",
+            "description": "Base currency (ISO 4217, e.g. EUR, USD, TRY)."
+          },
+          "FX_SYMBOLS": {
+            "type": "string",
+            "default": "USD,GBP,TRY,JPY",
+            "description": "Comma-separated target currencies to track."
+          },
+          "FX_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write each collection to InfluxDB as a time series."
+          }
+        }
+      },
+      "ui_schema": {
+        "FX_BASE": {
+          "ui:widget": "text",
+          "ui:group": "Rates"
+        },
+        "FX_SYMBOLS": {
+          "ui:widget": "textarea",
+          "ui:options": {
+            "rows": 2
+          },
+          "ui:group": "Rates"
+        },
+        "FX_SINK_INFLUXDB": {
+          "ui:widget": "toggle",
+          "ui:group": "Storage"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "convert",
+            "description": "Convert an amount from one currency to another (live rate).",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "amount": {
+                  "type": "number"
+                },
+                "from_currency": {
+                  "type": "string"
+                },
+                "to_currency": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "amount",
+                "from_currency",
+                "to_currency"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "Exchange Rates",
+        "summary": "ECB foreign-exchange rates as a time series, plus a convert tool.",
+        "logo": "banknote",
+        "color": "#22c55e",
+        "category": "data-source"
+      }
+    },
+    {
+      "package": "github",
+      "name": "github",
+      "version": "1.0.0",
+      "description": "Keyless GitHub repo stars/forks/issues time series + a stats tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [
+          "influxdb"
+        ],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "GH_REPOS": {
+            "type": "string",
+            "default": "torvalds/linux,python/cpython,minderhq/plugin-sdk",
+            "description": "Repositories to track, as 'owner/repo', comma-separated."
+          },
+          "GH_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write each collection to InfluxDB as a time series."
+          }
+        }
+      },
+      "ui_schema": {
+        "GH_REPOS": {
+          "ui:widget": "textarea",
+          "ui:options": {
+            "rows": 3
+          },
+          "ui:group": "Repositories"
+        },
+        "GH_SINK_INFLUXDB": {
+          "ui:widget": "toggle",
+          "ui:group": "Storage"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_repo_stats",
+            "description": "Get a public GitHub repository's current stars, forks and open issue count.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "repo": {
+                  "type": "string",
+                  "description": "Repository as 'owner/repo' (e.g. 'python/cpython')."
+                }
+              },
+              "required": [
+                "repo"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "GitHub Repos",
+        "summary": "Track public repositories' stars/forks/issues over time, plus a stats tool.",
+        "logo": "github",
+        "color": "#24292f",
+        "category": "data-source"
+      }
+    },
+    {
+      "package": "hackernews",
+      "name": "hackernews",
+      "version": "1.0.0",
+      "description": "Keyless Hacker News top stories + a headlines tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "HN_LIMIT": {
+            "type": "integer",
+            "default": 10,
+            "description": "How many top stories to fetch.",
+            "minimum": 1,
+            "maximum": 30
+          }
+        }
+      },
+      "ui_schema": {
+        "HN_LIMIT": {
+          "ui:widget": "number",
+          "ui:group": "Feed"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "top_stories",
+            "description": "Get the current top Hacker News stories (title + url).",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "integer",
+                  "description": "How many stories (1-30)."
+                }
+              }
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "Hacker News",
+        "summary": "Current Hacker News top stories, plus an ask-for-headlines tool.",
+        "logo": "newspaper",
+        "color": "#ff6600",
+        "category": "data-source"
+      }
+    },
+    {
+      "package": "news",
+      "name": "news",
+      "version": "1.0.0",
+      "description": "Fetches headlines from keyless RSS feeds; item-count series in InfluxDB.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "NEWS_FEEDS": {
+            "type": "string",
+            "default": "bbc:https://feeds.bbci.co.uk/news/rss.xml,guardian:https://www.theguardian.com/world/rss,aljazeera:https://www.aljazeera.com/xml/rss/all.xml,hackernews:https://hnrss.org/frontpage,arstechnica:https://feeds.arstechnica.com/arstechnica/index,nasa:https://www.nasa.gov/rss/dyn/breaking_news.rss,bbc_turkce:https://feeds.bbci.co.uk/turkce/rss.xml,ntv:https://www.ntv.com.tr/gundem.rss,trthaber:https://www.trthaber.com/manset_articles.rss,aa:https://www.aa.com.tr/tr/rss/default?cat=guncel,hurriyet:https://www.hurriyet.com.tr/rss/anasayfa",
+            "description": "RSS/Atom feeds as 'name:url' pairs, comma-separated. Each url must be https and resolve to a public address -- non-conforming entries are silently skipped at fetch time."
+          },
+          "NEWS_MAX_ITEMS": {
+            "type": "integer",
+            "default": 10,
+            "description": "Max headlines kept per feed."
+          },
+          "NEWS_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write the per-feed item-count metric to InfluxDB."
+          }
+        }
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_news",
+            "description": "Get the latest news headlines from the configured RSS feeds, optionally filtered to one feed.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "feed": {
+                  "type": "string",
+                  "description": "Feed name to filter to (e.g. 'hackernews'). Omit for all."
+                },
+                "limit": {
+                  "type": "integer",
+                  "description": "Max headlines to return (default 5)."
+                }
+              },
+              "required": []
+            }
+          }
+        }
+      ],
+      "display": {}
+    },
+    {
+      "package": "portfolio",
+      "name": "portfolio",
+      "version": "1.0.0",
+      "description": "Per-user holdings/watchlist price tracking (Yahoo, keyless) to InfluxDB.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "PORTFOLIO_HOLDINGS": {
+            "type": "string",
+            "default": "",
+            "description": "Yahoo symbols you personally hold/watch, comma-separated (e.g. AAPL,BTC-USD,TSLA). Empty = nothing tracked for you."
+          },
+          "PORTFOLIO_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write your holdings' price series to InfluxDB."
+          }
+        }
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_portfolio_value",
+            "description": "Return the latest recorded price for each symbol the calling user personally tracks in their private portfolio/watchlist. Reads only the caller's own holdings.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        }
+      ],
+      "display": {}
+    },
+    {
+      "package": "tefas_funds",
+      "name": "tefas",
+      "version": "1.0.0",
+      "description": "Backfills daily TEFAS fund prices into InfluxDB (tefas-crawler).",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "TEFAS_FUNDS": {
+            "type": "string",
+            "default": "",
+            "description": "TEFAS fund codes to track, comma-separated (e.g. AFA,AAK,IPB)."
+          },
+          "TEFAS_START_DATE": {
+            "type": "string",
+            "default": "2015-01-01",
+            "description": "ISO date to backfill from when InfluxDB is empty."
+          },
+          "TEFAS_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write the fund-price series to InfluxDB."
+          }
+        }
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_fund_price",
+            "description": "Get the latest daily price of a Turkish TEFAS investment fund by its fund code (e.g. AFA, AAK).",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "description": "TEFAS fund code, e.g. 'AFA'."
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {}
+    },
+    {
+      "package": "weather",
+      "name": "weather",
+      "version": "1.0.0",
+      "description": "Polls a keyless weather API and stores a time series in InfluxDB.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "WEATHER_LOCATIONS": {
+            "type": "string",
+            "default": "Istanbul:41.01:28.98,London:51.51:-0.13",
+            "description": "Locations to collect, as 'name:lat:lon' triples, comma-separated."
+          },
+          "WEATHER_SINK_INFLUXDB": {
+            "type": "boolean",
+            "default": true,
+            "description": "Write each collection to InfluxDB as a time series."
+          }
+        }
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get the current weather (temperature, humidity, wind) for a city by name, resolved via a public geocoding API.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "location": {
+                  "type": "string",
+                  "description": "City name, e.g. 'Istanbul', 'Tokyo', 'Berlin'."
+                }
+              },
+              "required": [
+                "location"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {}
+    }
+  ]
+}
