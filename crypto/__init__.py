@@ -218,7 +218,7 @@ class CryptoPlugin:
                 f"⚠️ Yahoo fetch failed for {symbol}: {type(e).__name__}: {e}"
             )
             return []
-        if not res:
+        if not res or not isinstance(res[0], dict):
             return []
         ts = res[0].get("timestamp") or []
         quote = (res[0].get("indicators") or {}).get("quote") or [{}]
