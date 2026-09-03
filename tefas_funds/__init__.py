@@ -25,6 +25,7 @@ configures, and fails soft everywhere; the data lands where TEFAS is reachable.
 
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -192,7 +193,10 @@ class TefasPlugin:
                     d.date() if hasattr(d, "date") else date.fromisoformat(str(d)[:10])
                 )
                 price = row["price"]
-                if price is not None:
+                # skip None AND non-finite (pandas NaN for a gap day is a float, not
+                # None — it would become `price=nan` and 400 the whole batch, stalling
+                # the incremental resume).
+                if price is not None and math.isfinite(float(price)):
                     ts = int(
                         datetime(
                             day.year, day.month, day.day, tzinfo=timezone.utc

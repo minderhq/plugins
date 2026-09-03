@@ -140,3 +140,17 @@ def test_get_fund_price_unavailable_when_empty(monkeypatch):
         "code": "YAC",
         "error": "price unavailable",
     }
+
+
+def test_fetch_sync_skips_nan_price(monkeypatch):
+    # pandas NaN for a gap day is a float (not None) — must be skipped, or it
+    # becomes `price=nan` and 400s the whole batch (stalling the resume).
+    p = TefasPlugin()
+    rows = [
+        {"date": "2021-01-05", "price": 1.5},
+        {"date": "2021-01-06", "price": float("nan")},  # skipped
+        {"date": "2021-01-07", "price": 2.5},
+    ]
+    monkeypatch.setattr(tefas_funds, "Crawler", _fake_crawler(_FakeDF(rows)))
+    out = p._fetch_sync("YAC", date(2021, 1, 5), date(2021, 1, 7))
+    assert [pr for _, pr in out] == [1.5, 2.5]

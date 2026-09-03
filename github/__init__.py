@@ -117,7 +117,7 @@ class GitHubPlugin(PluginBase):
         that don't match the safe owner/repo shape."""
         out: List[str] = []
         for item in spec.split(","):
-            repo = item.strip()
+            repo = item.strip().lower()
             if repo and _SAFE_REPO.match(repo) and repo not in out:
                 out.append(repo)
         return out

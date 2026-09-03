@@ -181,3 +181,11 @@ def test_write_influxdb_skips_non_int_fields(monkeypatch):
         p._write_influxdb({"a/b": {"stars": None, "forks": None, "open_issues": None}})
     )
     assert ok is False
+
+
+def test_parse_repos_lowercases_for_case_insensitive_dedup():
+    # GitHub paths are case-insensitive; lowercasing dedupes case-variants into
+    # one series instead of silently splitting them.
+    assert GitHubPlugin._parse_repos("Torvalds/Linux, torvalds/linux") == [
+        "torvalds/linux"
+    ]

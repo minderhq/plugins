@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 import httpx
 
-from minder_plugin_sdk import PluginBase, PluginMetadata
+from minder_plugin_sdk import PluginBase, PluginMetadata, line_protocol
 
 __all__ = ["FrankfurterPlugin"]
 
@@ -130,11 +130,49 @@ class FrankfurterPlugin(PluginBase):
         rates = body.get("rates")
         return rates if isinstance(rates, dict) else None
 
+    async def _write_influxdb(self, base: str, rates: Dict) -> bool:
+        """Write each rate as a point (measurement 'fx_rate', tags base+quote,
+        float field 'rate'). The advertised sink used to be a no-op."""
+        cfg = self.config.get("influxdb") or {}
+        if not (self.sink_influxdb and cfg.get("enabled") and rates):
+            return False
+        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
+        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
+        token = cfg.get("token", "")
+        lines = [
+            ln
+            for quote, rate in rates.items()
+            if isinstance(rate, (int, float))
+            and not isinstance(rate, bool)
+            and (
+                ln := line_protocol(
+                    "fx_rate", {"base": base, "quote": quote}, {"rate": float(rate)}
+                )
+            )
+        ]
+        if not lines:
+            return False
+        try:
+            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
+                resp = await client.post(
+                    f"http://{host}:{port}/api/v2/write",
+                    params={"org": org, "bucket": bucket, "precision": "s"},
+                    headers={"Authorization": f"Token {token}"},
+                    content="\n".join(lines),
+                )
+                resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.warning(f"InfluxDB write failed: {type(e).__name__}")
+            return False
+
     async def collect_data(self) -> Dict:
         rates = await self._latest(self.base, self.symbols)
+        wrote = await self._write_influxdb(self.base, rates or {})
         self._last = {
             "base": self.base,
             "rates": rates or {},
+            "influxdb_written": wrote,
             "collected_at": datetime.now(timezone.utc).isoformat(),
         }
         logger.info(f"fx collect: base={self.base} rates={len(rates or {})}")

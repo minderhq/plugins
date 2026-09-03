@@ -61,6 +61,17 @@ _MEASUREMENT = "portfolio_holding"
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
+def _owner_tag(owner: str) -> str:
+    """Scrub an owner_id (a JWT sub — may be ``auth0|123``, an email, ``a:b``…) to
+    the safe charset used BOTH as the InfluxDB tag and interpolated into the v3
+    SQL query. Replacing EVERY non-safe char (not just space/comma/equals) keeps
+    the write and read paths consistent and neutralises SQL/line-protocol
+    metacharacters — incl. the quote the old ``[ ,=\\n]`` scrub missed. A real sub
+    like ``auth0|123`` becomes ``auth0_123`` on both paths, instead of being
+    happily written and then rejected (raising) on read."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", owner)
+
+
 def _day_to_unix(day: date) -> int:
     """UTC-midnight unix timestamp for a calendar date -- Yahoo's chart API
     takes period1/period2 as unix seconds, but a `datetime.date` (from Yahoo's
@@ -190,7 +201,7 @@ class PortfolioPlugin:
                 f"⚠️ Yahoo fetch failed for {symbol}: {type(e).__name__}: {e}"
             )
             return None
-        if not res:
+        if not res or not isinstance(res[0], dict):
             return None
         ts = res[0].get("timestamp") or []
         quote = (res[0].get("indicators") or {}).get("quote") or [{}]
@@ -230,7 +241,7 @@ class PortfolioPlugin:
         # the auth layer before it ever reaches plugin config) -- still worth
         # excluding InfluxDB line-protocol metacharacters defensively, same
         # spirit as _SAFE_SYMBOL above.
-        owner_tag = re.sub(r"[ ,=\n]", "_", self._owner_id)
+        owner_tag = _owner_tag(self._owner_id)
         line = f"{_MEASUREMENT},symbol={symbol},owner_id={owner_tag} price={close} {ts}"
         try:
             async with httpx.AsyncClient(timeout=self.http_timeout) as client:
@@ -293,12 +304,10 @@ class PortfolioPlugin:
         owner = str(owner_id or "").strip()
         if not owner:
             raise ValueError("owner_id is required")
-        # owner_id is a JWT sub (a safe identifier by the time it reaches here), but
-        # it's interpolated into an InfluxDB SQL query -- guard defensively, same
-        # spirit as _SAFE_SYMBOL / the write path's owner_tag scrub.
-        owner_tag = re.sub(r"[ ,=\n]", "_", owner)
-        if not _SAFE_SYMBOL.match(owner_tag):
-            raise ValueError("unsafe owner_id")
+        # owner_id is a JWT sub interpolated into an InfluxDB SQL query + used as a
+        # tag; _owner_tag scrubs it to the SQL/tag-safe charset (same on write), so
+        # a real sub (auth0|123, an email) reads back exactly as written — no raise.
+        owner_tag = _owner_tag(owner)
 
         cfg = self.config.get("influxdb") or {}
         base = {"owner_id": owner, "holdings": {}, "symbol_count": 0}

@@ -11,7 +11,7 @@ import frankfurter
 from frankfurter import FrankfurterPlugin
 
 
-def _client(payload, *, raise_on_get=False):
+def _client(payload, *, raise_on_get=False, capture=None):
     class _Resp:
         def raise_for_status(self):
             return None
@@ -32,6 +32,11 @@ def _client(payload, *, raise_on_get=False):
         async def get(self, url, params=None):
             if raise_on_get:
                 raise RuntimeError("boom")
+            return _Resp()
+
+        async def post(self, url, params=None, headers=None, content=None):
+            if capture is not None:
+                capture["content"] = content
             return _Resp()
 
     return _Client
@@ -128,3 +133,23 @@ def test_convert_bad_amount(monkeypatch):
     assert asyncio.run(p.convert("notnum", "usd", "try")) == {
         "error": "amount must be a number"
     }
+
+
+def test_write_influxdb_emits_a_point_per_rate(monkeypatch):
+    p = FrankfurterPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    cap = {}
+    monkeypatch.setattr(frankfurter.httpx, "AsyncClient", _client({}, capture=cap))
+    ok = asyncio.run(p._write_influxdb("EUR", {"USD": 1.1, "TRY": 34.0}))
+    assert ok is True
+    body = cap["content"]
+    assert "fx_rate,base=EUR,quote=USD rate=1.1" in body
+    assert "fx_rate,base=EUR,quote=TRY rate=34.0" in body
+
+
+def test_write_influxdb_gated_off_when_sink_disabled(monkeypatch):
+    p = FrankfurterPlugin()
+    p.sink_influxdb = False
+    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb("EUR", {"USD": 1.1})) is False

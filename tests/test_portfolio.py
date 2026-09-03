@@ -12,7 +12,7 @@ import portfolio
 from portfolio import PortfolioPlugin
 
 
-def _post_client(rows, *, raise_on_post=False):
+def _post_client(rows, *, raise_on_post=False, capture=None):
     class _Resp:
         def raise_for_status(self):
             return None
@@ -31,6 +31,9 @@ def _post_client(rows, *, raise_on_post=False):
             return False
 
         async def post(self, url, json=None, headers=None):
+            if capture is not None:
+                capture["json"] = json
+                capture["query"] = (json or {}).get("q", "")
             if raise_on_post:
                 raise RuntimeError("boom")
             return _Resp()
@@ -67,11 +70,18 @@ def test_get_value_requires_owner():
         asyncio.run(PortfolioPlugin().get_value(""))
 
 
-def test_get_value_rejects_unsafe_owner():
-    # an apostrophe survives the space/comma/equals/newline scrub → fails the
-    # charset guard → ValueError, not an InfluxDB SQL injection
-    with pytest.raises(ValueError, match="unsafe owner_id"):
-        asyncio.run(PortfolioPlugin().get_value("a'b"))
+def test_unsafe_owner_chars_are_scrubbed_not_rejected(monkeypatch):
+    # an owner with SQL/line-protocol metacharacters (apostrophe, and real JWT-sub
+    # chars like | @ :) is SCRUBBED to the safe charset — not rejected — so it
+    # reads back what the write path (same scrub) stored. No SQL injection.
+    p = _enabled(PortfolioPlugin())
+    cap = {}
+    monkeypatch.setattr(portfolio.httpx, "AsyncClient", _post_client([], capture=cap))
+    asyncio.run(p.get_value("auth0|a'b @c"))  # must NOT raise
+    # the value is scrubbed to the safe charset (no injection chars leak in); the
+    # only quotes in the query are the SQL string delimiters around that value.
+    assert "owner_id = 'auth0_a_b__c'" in cap["query"]
+    assert "|" not in cap["query"] and "a'b" not in cap["query"]
 
 
 def test_get_value_influx_disabled_short_circuits():
