@@ -11,8 +11,13 @@
    minder-plugin validate <name>/__init__.py
    pytest -q
    ```
-4. Add a row to the README catalog table and open a PR. CI runs
-   `minder-plugin validate` on every plugin and `pytest` (auto-discovers each).
+4. Regenerate the machine-readable catalog index and add a row to the README
+   catalog table, then open a PR. CI runs `minder-plugin validate` on every
+   plugin and `pytest` (auto-discovers each; a test fails if `catalog.json` is
+   stale).
+   ```bash
+   python scripts/gen_catalog.py    # refresh catalog.json
+   ```
 
 Design & contract: https://github.com/minderhq/plugin-sdk
 Governance: https://github.com/minderhq/minder/blob/main/docs/development/issue-and-pr-conventions.md
