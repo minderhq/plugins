@@ -74,13 +74,13 @@ class CryptoPlugin:
             "key": "CRYPTO_SYMBOLS",
             "type": "string",
             "default": _DEFAULT_SYMBOLS,
-            "description": "Yahoo symbols to backfill, comma-separated (e.g. BTC-USD,ETH-USD,BTC-EUR).",
+            "description": "Yahoo symbols to backfill, comma-separated (e.g. BTC-USD,ETH-USD).",
         },
         {
             "key": "CRYPTO_START_DATE",
             "type": "string",
             "default": "",
-            "description": "ISO date to backfill from when InfluxDB is empty; blank = earliest available.",
+            "description": "ISO date to backfill from when empty; blank = earliest available.",
         },
         {
             "key": "CRYPTO_SINK_INFLUXDB",
