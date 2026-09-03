@@ -12,14 +12,16 @@ Every plugin lives in its own top-level directory as a package:
 
 ## How it reaches a running Minder
 
-This repo is **vendored into the core** at `src/plugins/` via a git submodule, so
-the plugin-registry loads the whole catalog on startup — no per-plugin install, and
-a `--recurse-submodules` clone stays offline-friendly (see
-[minderhq/minder#1256](https://github.com/minderhq/minder/issues/1256)).
+The plugin-registry **discovers and loads module plugins on startup** and lists
+them at `/v1/plugins`. By design nothing runs arbitrary code — a plugin is fixed
+handlers (or a declarative manifest), never uploaded code.
 
-> **Status:** the submodule vendoring is being wired up; until it lands, the
-> shipped first-party plugins still live in the core repo. New catalog plugins are
-> developed and validated here.
+> **Status:** wiring this public catalog into a running core (git-submodule
+> vendoring at `src/plugins/`, the way the web client already is) is planned but
+> **not yet wired** — tracked in
+> [minderhq/minder#1303](https://github.com/minderhq/minder/issues/1303). Today
+> the first-party plugins shipped inside the core still live in the core repo;
+> new catalog plugins are developed and validated here.
 
 ## Contributing a plugin
 
@@ -40,8 +42,14 @@ a `--recurse-submodules` clone stays offline-friendly (see
 
 | Plugin | What |
 |--------|------|
+| [`crypto`](crypto) | Keyless daily crypto close prices (Yahoo) → InfluxDB + a `get_price` AI tool. |
 | [`frankfurter`](frankfurter) | Keyless ECB foreign-exchange rates + a `convert` AI tool. |
+| [`github`](github) | Keyless public-repo stars/forks/issues time series + a `get_repo_stats` AI tool. |
 | [`hackernews`](hackernews) | Keyless Hacker News top stories + a `top_stories` AI tool. |
+| [`news`](news) | Keyless RSS/Atom headlines + per-feed volume metric + a `get_news` AI tool. |
+| [`portfolio`](portfolio) | Per-user holdings/watchlist price tracking (Yahoo) → InfluxDB + a `get_value` action. |
+| [`tefas_funds`](tefas_funds) | Keyless TEFAS (Turkish fund) daily prices → InfluxDB + a `get_fund_price` AI tool. |
+| [`weather`](weather) | Keyless Open-Meteo current-conditions time series + a `get_weather` AI tool. |
 
 ## License
 
