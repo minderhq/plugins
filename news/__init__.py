@@ -35,7 +35,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import PluginMetadata, line_protocol
 
 __all__ = ["NewsPlugin"]
 
@@ -295,14 +295,11 @@ class NewsPlugin:
         host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
         org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
         token = cfg.get("token", "")
-        rows = []
-        for feed, n in counts.items():
-            # line-protocol tag values must escape comma, equals AND space — a
-            # config feed name containing "=" or "," would otherwise corrupt the
-            # tag set (only space was escaped before).
-            tag = feed.replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
-            rows.append(f"news,feed={tag} item_count={n}i")
-        lines = "\n".join(rows)
+        # line_protocol escapes the feed tag; item_count is an int → 'Ni'.
+        lines = "\n".join(
+            line_protocol("news", {"feed": feed}, {"item_count": n})
+            for feed, n in counts.items()
+        )
         url = f"http://{host}:{port}/api/v2/write"
         try:
             async with httpx.AsyncClient(timeout=self.http_timeout) as client:
