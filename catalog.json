@@ -1,7 +1,73 @@
 {
   "source": "minderhq/plugins",
-  "count": 9,
+  "count": 10,
   "plugins": [
+    {
+      "package": "arxiv",
+      "name": "arxiv",
+      "version": "1.0.0",
+      "description": "Keyless arXiv academic-paper search, exposed as an AI tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "ARXIV_MAX_RESULTS": {
+            "type": "integer",
+            "default": 5,
+            "description": "Default number of papers to return (1-20)."
+          }
+        }
+      },
+      "ui_schema": {
+        "ARXIV_MAX_RESULTS": {
+          "ui:widget": "number",
+          "ui:group": "Search"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "search_papers",
+            "description": "Search arXiv for academic papers on a topic. Returns each paper's title, authors, abstract, publication date, and URL.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "The research topic or keywords, e.g. 'retrieval augmented generation'."
+                },
+                "max_results": {
+                  "type": "integer",
+                  "description": "How many papers to return (1-20)."
+                }
+              },
+              "required": [
+                "query"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "arXiv",
+        "summary": "Search academic papers on arXiv \u2014 a research-lookup tool for the LLM.",
+        "logo": "graduation-cap",
+        "color": "#b31b1b",
+        "category": "ai-tool"
+      }
+    },
     {
       "package": "crypto",
       "name": "crypto",
