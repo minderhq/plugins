@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 
 import httpx
 
-from minder_plugin_sdk import PluginBase, PluginMetadata
+from minder_plugin_sdk import PluginBase, PluginMetadata, line_protocol
 
 __all__ = ["GitHubPlugin"]
 
@@ -177,22 +177,21 @@ class GitHubPlugin(PluginBase):
         host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
         org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
         token = cfg.get("token", "")
-        lines = []
-        for repo, s in stats.items():
-            fields = [
-                f"{k}={int(v)}i"
-                for k, v in (
-                    ("stars", s.get("stars")),
-                    ("forks", s.get("forks")),
-                    ("open_issues", s.get("open_issues")),
-                )
-                if isinstance(v, int) and not isinstance(v, bool)
-            ]
-            if fields:
-                # line-protocol tag values escape comma, equals AND space (a repo
-                # is owner/repo — '/' is legal in a tag, but escape defensively).
-                tag = repo.replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
-                lines.append(f"github_repo,repo={tag} {','.join(fields)}")
+        # line_protocol escapes the repo tag + formats/drops fields (a repo with
+        # no numeric stats yields "" and is filtered out).
+        lines = [
+            line_protocol(
+                "github_repo",
+                {"repo": repo},
+                {
+                    "stars": s.get("stars"),
+                    "forks": s.get("forks"),
+                    "open_issues": s.get("open_issues"),
+                },
+            )
+            for repo, s in stats.items()
+        ]
+        lines = [ln for ln in lines if ln]
         if not lines:
             return False
         url = f"http://{host}:{port}/api/v2/write"

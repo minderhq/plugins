@@ -202,3 +202,46 @@ def test_collect_data_skips_failed_locations_and_gates_influx(monkeypatch):
     res = asyncio.run(p.collect_data())
     assert set(res["readings"]) == {"A"}
     assert res["influxdb_written"] is False
+
+
+def test_write_influxdb_emits_float_fields_not_integers(monkeypatch):
+    """Guard the type-preservation decision: this series has always been float
+    (the old writer emitted a bare value, no 'i' suffix). An integer humidity
+    (2) must still be written as a FLOAT (2.0), or InfluxDB rejects the point on
+    a field-type conflict with the existing float column."""
+    p = WeatherPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    cap = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, params=None, headers=None, content=None):
+            cap["content"] = content
+            return _Resp()
+
+    monkeypatch.setattr(weather.httpx, "AsyncClient", _Client)
+    ok = asyncio.run(
+        p._write_influxdb(
+            {"Ankara": {"temperature": 5.0, "humidity": 2, "wind_speed": 3}}
+        )
+    )
+    assert ok is True
+    # no 'i' suffix anywhere — every field is a float
+    assert (
+        cap["content"]
+        == "weather,location=Ankara temperature=5.0,humidity=2.0,wind_speed=3.0"
+    )
+    assert "i," not in cap["content"] and not cap["content"].rstrip().endswith("i")
