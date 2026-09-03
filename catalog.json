@@ -1,6 +1,6 @@
 {
   "source": "minderhq/plugins",
-  "count": 8,
+  "count": 9,
   "plugins": [
     {
       "package": "crypto",
@@ -520,6 +520,68 @@
         }
       ],
       "display": {}
+    },
+    {
+      "package": "wikipedia",
+      "name": "wikipedia",
+      "version": "1.0.0",
+      "description": "Keyless Wikipedia article-summary lookup, exposed as an AI tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "WIKI_LANG": {
+            "type": "string",
+            "default": "en",
+            "description": "Wikipedia language subdomain (e.g. 'en', 'tr', 'de')."
+          }
+        }
+      },
+      "ui_schema": {
+        "WIKI_LANG": {
+          "ui:widget": "text",
+          "ui:group": "Lookup"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "wiki_summary",
+            "description": "Look up a short factual summary of a topic from Wikipedia (title, extract, and the article URL).",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "topic": {
+                  "type": "string",
+                  "description": "What to look up, e.g. 'Alan Turing', 'RAG'."
+                }
+              },
+              "required": [
+                "topic"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "Wikipedia",
+        "summary": "Look up a factual article summary \u2014 an ask-Wikipedia tool for the LLM.",
+        "logo": "book-open",
+        "color": "#636466",
+        "category": "ai-tool"
+      }
     }
   ]
 }

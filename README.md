@@ -50,6 +50,7 @@ handlers (or a declarative manifest), never uploaded code.
 | [`portfolio`](portfolio) | Per-user holdings/watchlist price tracking (Yahoo) → InfluxDB + a `get_value` action. |
 | [`tefas_funds`](tefas_funds) | Keyless TEFAS (Turkish fund) daily prices → InfluxDB + a `get_fund_price` AI tool. |
 | [`weather`](weather) | Keyless Open-Meteo current-conditions time series + a `get_weather` AI tool. |
+| [`wikipedia`](wikipedia) | Keyless Wikipedia article-summary lookup, exposed as a `wiki_summary` AI tool (a "Talent"). |
 
 ## License
 
