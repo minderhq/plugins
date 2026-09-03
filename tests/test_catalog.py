@@ -5,6 +5,7 @@ and runs ``check_plugin``. Adding a plugin dir automatically brings it under tes
 a broken plugin fails CI.
 """
 
+import asyncio
 import importlib
 import inspect
 import sys
@@ -50,3 +51,21 @@ def test_plugin_honours_the_contract(pkg):
     assert isinstance(plugin, Plugin) or hasattr(plugin, "register")
     problems = check_plugin(plugin)
     assert problems == [], f"{pkg}: {problems}"
+
+
+@pytest.mark.parametrize("pkg", _plugin_packages())
+def test_plugin_lifecycle_runtime(pkg):
+    """Run the lifecycle for real: register() must return usable metadata and
+    health_check() must honour the {"healthy": bool} contract (the easy-to-miss
+    rule the monitoring loop depends on)."""
+    module = importlib.import_module(pkg)
+    plugin = _plugin_class(module)()
+    meta = asyncio.run(plugin.register())
+    assert getattr(meta, "name", None) and getattr(
+        meta, "version", None
+    ), f"{pkg}: register() returned incomplete metadata: {meta!r}"
+    if hasattr(plugin, "health_check"):
+        health = asyncio.run(plugin.health_check())
+        assert isinstance(health, dict) and isinstance(
+            health.get("healthy"), bool
+        ), f"{pkg}: health_check() must return {{'healthy': bool}}, got {health!r}"
