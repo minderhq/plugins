@@ -297,7 +297,10 @@ class NewsPlugin:
         token = cfg.get("token", "")
         rows = []
         for feed, n in counts.items():
-            tag = feed.replace(" ", "\\ ")  # escape spaces in the line-protocol tag
+            # line-protocol tag values must escape comma, equals AND space — a
+            # config feed name containing "=" or "," would otherwise corrupt the
+            # tag set (only space was escaped before).
+            tag = feed.replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
             rows.append(f"news,feed={tag} item_count={n}i")
         lines = "\n".join(rows)
         url = f"http://{host}:{port}/api/v2/write"
