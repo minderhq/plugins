@@ -1,6 +1,6 @@
 {
   "source": "minderhq/plugins",
-  "count": 9,
+  "count": 10,
   "plugins": [
     {
       "package": "crypto",
@@ -354,6 +354,72 @@
         }
       ],
       "display": {}
+    },
+    {
+      "package": "openlibrary",
+      "name": "openlibrary",
+      "version": "1.0.0",
+      "description": "Keyless Open Library book search, exposed as an AI tool.",
+      "author": "minderhq",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "OPENLIBRARY_MAX_RESULTS": {
+            "type": "integer",
+            "default": 5,
+            "description": "Default number of books to return (1-20)."
+          }
+        }
+      },
+      "ui_schema": {
+        "OPENLIBRARY_MAX_RESULTS": {
+          "ui:widget": "number",
+          "ui:group": "Search"
+        }
+      },
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "search_books",
+            "description": "Search Open Library for books by title, topic, or author. Returns each book's title, authors, first publication year, and URL.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "Title, topic, or author, e.g. 'distributed systems' or 'Ursula K. Le Guin'."
+                },
+                "max_results": {
+                  "type": "integer",
+                  "description": "How many books to return (1-20)."
+                }
+              },
+              "required": [
+                "query"
+              ]
+            }
+          }
+        }
+      ],
+      "display": {
+        "label": "Open Library",
+        "summary": "Search books on Open Library \u2014 a book-lookup tool for the LLM.",
+        "logo": "library",
+        "color": "#e1dcc5",
+        "category": "ai-tool"
+      }
     },
     {
       "package": "portfolio",
