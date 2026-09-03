@@ -15,11 +15,10 @@ Config (all optional):
 
 import logging
 import os
-import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
 
+import defusedxml.ElementTree as ET
 import httpx
-
 from minder_plugin_sdk import PluginBase, PluginMetadata
 
 __all__ = ["ArxivPlugin"]
@@ -157,8 +156,9 @@ class ArxivPlugin(PluginBase):
 
 def _parse_feed(feed_text: str) -> List[Dict]:
     """Parse an arXiv Atom feed into a list of paper dicts (fail-soft: a malformed
-    feed yields []). stdlib ElementTree does not resolve external entities, and
-    the feed is fetched over HTTPS, so this is safe against XXE for our use."""
+    feed yields []). Uses defusedxml (the catalog's XML convention, cf. the news
+    plugin) — it rejects entity-expansion / external-entity (XXE) attacks outright,
+    so a hostile or MITM'd feed can't do more than fail to parse."""
     try:
         root = ET.fromstring(feed_text)
     except ET.ParseError:
