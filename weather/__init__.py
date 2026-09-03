@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import httpx
 
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import PluginMetadata, line_protocol
 
 __all__ = ["WeatherPlugin"]
 
@@ -214,23 +214,32 @@ class WeatherPlugin:
         host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
         org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
         token = cfg.get("token", "")
-        lines = []
-        for loc, r in readings.items():
-            fields = [
-                f"{k}={v}"
-                for k, v in (
-                    ("temperature", r.get("temperature")),
-                    ("humidity", r.get("humidity")),
-                    ("wind_speed", r.get("wind_speed")),
-                )
-                if isinstance(v, (int, float))
-            ]
-            if fields:
-                # line-protocol tag values must escape comma, equals AND space —
-                # a config location like "a=b" or "x,y" would otherwise corrupt
-                # the tag set (only space was escaped before).
-                tag = loc.replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
-                lines.append(f"weather,location={tag} {','.join(fields)}")
+
+        # Cast to float so every reading is a FLOAT field: this series has always
+        # been float-typed (the old writer emitted a bare `{v}`, no `i` suffix),
+        # and mixing an integer humidity into a float field would make InfluxDB
+        # reject the write. line_protocol then escapes the location tag + drops
+        # any missing (None) reading.
+        def _num(v: object) -> Optional[float]:
+            return (
+                float(v)
+                if isinstance(v, (int, float)) and not isinstance(v, bool)
+                else None
+            )
+
+        lines = [
+            line_protocol(
+                "weather",
+                {"location": loc},
+                {
+                    "temperature": _num(r.get("temperature")),
+                    "humidity": _num(r.get("humidity")),
+                    "wind_speed": _num(r.get("wind_speed")),
+                },
+            )
+            for loc, r in readings.items()
+        ]
+        lines = [ln for ln in lines if ln]
         if not lines:
             return False
         url = f"http://{host}:{port}/api/v2/write"
