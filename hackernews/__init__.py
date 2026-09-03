@@ -101,6 +101,10 @@ class HackerNewsPlugin(PluginBase):
 
     async def _top(self, limit: int) -> List[Dict]:
         try:
+            limit = int(limit)  # an LLM tool call may pass a string
+        except (TypeError, ValueError):
+            limit = 10
+        try:
             async with httpx.AsyncClient(timeout=self.http_timeout) as client:
                 ids = await self._fetch_json(client, "topstories.json") or []
                 ids = ids[: max(1, min(30, limit))]

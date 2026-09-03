@@ -200,7 +200,11 @@ class WeatherPlugin:
         lat, lon = results[0].get("latitude"), results[0].get("longitude")
         if lat is None or lon is None:
             return None
-        return float(lat), float(lon)
+        try:
+            return float(lat), float(lon)
+        except (TypeError, ValueError):
+            # present but non-numeric coords → fail soft (None), not a 500.
+            return None
 
     async def _write_influxdb(self, readings: Dict[str, Dict]) -> bool:
         """Write readings to InfluxDB via the HTTP /api/v2/write API (line protocol)."""

@@ -28,7 +28,7 @@ import asyncio
 import ipaddress
 import logging
 import os
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
