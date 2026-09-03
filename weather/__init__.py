@@ -226,7 +226,10 @@ class WeatherPlugin:
                 if isinstance(v, (int, float))
             ]
             if fields:
-                tag = loc.replace(" ", "\\ ")
+                # line-protocol tag values must escape comma, equals AND space —
+                # a config location like "a=b" or "x,y" would otherwise corrupt
+                # the tag set (only space was escaped before).
+                tag = loc.replace(",", "\\,").replace("=", "\\=").replace(" ", "\\ ")
                 lines.append(f"weather,location={tag} {','.join(fields)}")
         if not lines:
             return False
