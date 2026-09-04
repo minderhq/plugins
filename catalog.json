@@ -1,6 +1,6 @@
 {
   "source": "minderhq/plugins",
-  "count": 10,
+  "count": 11,
   "plugins": [
     {
       "package": "arxiv",
