@@ -1,13 +1,14 @@
 """News plugin (first-party module plugin).
 
-Fetches headlines from public, **keyless** RSS/Atom feeds (parsed with the stdlib
-``xml.etree``), serves the latest items, and writes a per-feed item-count metric into
+Fetches headlines from public, **keyless** RSS/Atom feeds (parsed with
+``defusedxml`` — hardened against XXE / entity-expansion on a hostile or MITM'd
+feed), serves the latest items, and writes a per-feed item-count metric into
 InfluxDB (measurement ``news``, tag ``feed``, field ``item_count``) so feed volume can
 be charted. ``get_news`` is an on-demand action + Ollama tool ("latest headlines?").
 
 Deliberately keyless (RSS, not a paid news API) so it needs no API-key/config decision
 and works in any environment. Uses only deps already in the plugin-registry image
-(``httpx`` + stdlib ``xml.etree``) — bind-mounted, so edit + ``docker restart
+(``httpx`` + ``defusedxml``) — bind-mounted, so edit + ``docker restart
 minder-plugin-registry``, no image rebuild.
 
 Config (env on plugin-registry; all optional — keyless defaults):
