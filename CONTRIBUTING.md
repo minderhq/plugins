@@ -13,11 +13,16 @@
    ```
 4. Regenerate the machine-readable catalog index and add a row to the README
    catalog table, then open a PR. CI runs `minder-plugin validate` on every
-   plugin and `pytest` (auto-discovers each; a test fails if `catalog.json` is
-   stale).
+   plugin, `pytest` (auto-discovers each; a test fails if `catalog.json` is
+   stale), lint/type-check, and a secrets scan — most review is mechanical.
    ```bash
    python scripts/gen_catalog.py    # refresh catalog.json
    ```
+
+**Certification / tier** (community vs. pro/enterprise) is not yet a defined
+process — every catalog plugin today is treated as community-tier. How a
+submitted plugin earns a paid tier is a product decision, tracked separately
+in this repo's #31, not something this guide can answer yet.
 
 Design & contract: https://github.com/minderhq/plugin-sdk
 Governance: https://github.com/minderhq/minder/blob/main/docs/development/issue-and-pr-conventions.md
