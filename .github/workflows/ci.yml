@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request
+    # (including from forks -- this repo is public) stays on GitHub-hosted so an
+    # external contributor's PR never executes on our infrastructure.
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","Linux","X64","org-shared"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
