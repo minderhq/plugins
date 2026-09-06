@@ -52,3 +52,29 @@ jobs:
           done
       - name: Test the whole catalog
         run: pytest -q
+
+  secrets-scan:
+    name: Secrets Scan
+    # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request
+    # (including from forks -- this repo is public) stays on GitHub-hosted, same
+    # split as `validate` above.
+    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","Linux","X64","org-shared"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog
+        # Pinned to a specific SHA, not a mutable branch/tag -- see minderhq/minder's
+        # quality.yml Secrets Scan job for the incident (CVE-2026-33634) that
+        # motivated this.
+        uses: trufflesecurity/trufflehog@bcfcf73aaf4759d4dadc2783177c245a02792318 # v3.97.0
+        with:
+          path: ./
+          # github.event.before only exists on `push` payloads, not `pull_request`
+          # ones -- use the PR's own base SHA there instead (matches minderhq/minder's
+          # quality.yml fix for the same gotcha: omitting this falls back to scanning
+          # full repo history on every PR run instead of just the incremental diff).
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.sha }}
+          extra_args: --only-verified
