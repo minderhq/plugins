@@ -1,4 +1,4 @@
-"""Unit tests for the network discovery plugin (src/plugins/network).
+"""Unit tests for the network discovery plugin (this repo's network/).
 
 Pure-logic coverage (target expansion, nmap-XML parsing, telegraf-config rendering)
 plus orchestration with mocked subprocess/backends so no real nmap/snmp/network runs.
