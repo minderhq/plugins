@@ -16,12 +16,12 @@ The plugin-registry **discovers and loads module plugins on startup** and lists
 them at `/v1/plugins`. By design nothing runs arbitrary code — a plugin is fixed
 handlers (or a declarative manifest), never uploaded code.
 
-> **Status:** wiring this public catalog into a running core (git-submodule
-> vendoring at `src/plugins/`, the way the web client already is) is planned but
-> **not yet wired** — tracked in
-> [minderhq/minder#1303](https://github.com/minderhq/minder/issues/1303). Today
-> the first-party plugins shipped inside the core still live in the core repo;
-> new catalog plugins are developed and validated here.
+> **Status:** wired. This catalog is vendored into `minderhq/minder` as a git
+> submodule (`src/plugins_catalog/`); its Dockerfile merges every plugin here
+> into the running plugin-registry at build time (minderhq/minder#1460/#1472).
+> `network`/`telegraf` (Minder's own first-party infra plugins) moved here
+> too, so this repo is now the single source for every plugin — first-party
+> and community alike, no plugin duplicated between the two repos.
 
 ## Contributing a plugin
 

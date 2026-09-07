@@ -1,0 +1,503 @@
+"""Unit tests for the network discovery plugin (src/plugins/network).
+
+Pure-logic coverage (target expansion, nmap-XML parsing, telegraf-config rendering)
+plus orchestration with mocked subprocess/backends so no real nmap/snmp/network runs.
+"""
+
+import asyncio
+import time
+from unittest.mock import AsyncMock, MagicMock
+
+import network as netmod
+from network import (
+    _ARP_MAC_OID,
+    _IF_DESCR_OID,
+    _IF_MAC_OID,
+    _IF_OPERSTATUS_OID,
+    NetworkPlugin,
+    _configured_cidrs,
+    _diff_hosts,
+    _expand_targets,
+    _extract_neighbor_ips,
+    _parse_arp,
+    _parse_nmap_xml,
+    _parse_snmpwalk,
+    _telegraf_config,
+)
+
+_NMAP_XML = """<?xml version="1.0"?>
+<nmaprun>
+  <host>
+    <status state="up"/>
+    <address addr="10.0.0.5" addrtype="ipv4"/>
+    <hostnames><hostname name="router.local"/></hostnames>
+    <ports>
+      <port protocol="tcp" portid="22"><state state="open"/>
+        <service name="ssh" product="OpenSSH" version="9.2"/></port>
+      <port protocol="tcp" portid="161"><state state="open"/>
+        <service name="snmp"/></port>
+      <port protocol="tcp" portid="8080"><state state="closed"/>
+        <service name="http"/></port>
+    </ports>
+  </host>
+  <host>
+    <status state="down"/>
+    <address addr="10.0.0.6" addrtype="ipv4"/>
+  </host>
+</nmaprun>"""
+
+
+# ── pure helpers ──────────────────────────────────────────────────────────────
+def test_expand_cidr_and_cap():
+    assert _expand_targets("10.0.0.0/30", 256) == ["10.0.0.1", "10.0.0.2"]
+    assert len(_expand_targets("10.0.0.0/24", 5)) == 5
+    assert _expand_targets("example.com", 256) == ["example.com"]
+    assert _expand_targets(" , ,", 256) == []
+
+
+def test_parse_nmap_xml_open_ports_only():
+    hosts = _parse_nmap_xml(_NMAP_XML)
+    assert len(hosts) == 2
+    h = hosts[0]
+    assert h["host"] == "10.0.0.5"
+    assert h["hostname"] == "router.local"
+    assert h["state"] == "up"
+    assert [p["port"] for p in h["ports"]] == [22, 161]  # closed 8080 excluded
+    assert h["ports"][0]["service"] == "ssh"
+    assert h["ports"][0]["product"] == "OpenSSH"
+    assert hosts[1]["state"] == "down" and hosts[1]["ports"] == []
+
+
+def test_parse_nmap_xml_bad_input():
+    assert _parse_nmap_xml("not xml at all") == []
+
+
+def test_telegraf_config_net_response_and_snmp():
+    hosts = [
+        {
+            "host": "10.0.0.5",
+            "ports": [
+                {"port": 22, "protocol": "tcp"},
+                {"port": 161, "protocol": "tcp"},
+            ],
+            "snmp": {"sysName": "router"},
+        }
+    ]
+    cfg = _telegraf_config(hosts, "public")
+    assert cfg.count("[[inputs.net_response]]") == 2
+    assert 'address = "10.0.0.5:22"' in cfg
+    assert "[[inputs.snmp]]" in cfg
+    assert 'agents = ["udp://10.0.0.5:161"]' in cfg
+    assert 'community = "public"' in cfg
+    assert 'oid = "1.3.6.1.2.1.1.5.0"' in cfg  # sysName field
+
+
+def test_telegraf_config_empty():
+    assert _telegraf_config([], "public") == ""
+
+
+def test_telegraf_config_tenant_tag():
+    # #984: every emitted input must carry a [inputs.X.tags] tenant_id so the
+    # net_response / snmp series land in InfluxDB tagged with the owning tenant.
+    hosts = [
+        {
+            "host": "10.0.0.5",
+            "ports": [{"port": 22, "protocol": "tcp"}],
+            "snmp": {"sysName": "router"},
+        }
+    ]
+    cfg = _telegraf_config(hosts, "public", "org-42")
+    assert "[inputs.net_response.tags]" in cfg
+    assert "[inputs.snmp.tags]" in cfg
+    assert cfg.count('tenant_id = "org-42"') == 2
+    # default (no tenant) still emits the tag block, empty-valued
+    cfg0 = _telegraf_config(hosts, "public")
+    assert 'tenant_id = ""' in cfg0
+
+
+# ── lifecycle + orchestration (mocked backends) ──────────────────────────────
+def test_register_and_health(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "1.1.1.1")
+    pl = NetworkPlugin({})
+    md = asyncio.run(pl.register())
+    assert md.name == "network" and md.version == "1.0.0"
+    h = asyncio.run(pl.health_check())
+    assert h["healthy"] is True and h["targets_configured"] is True
+    assert "nmap" in h and "snmp" in h
+
+
+def test_scan_via_nmap_path(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.5")
+    monkeypatch.setattr(
+        netmod.shutil, "which", lambda b: f"/usr/bin/{b}" if b == "nmap" else None
+    )
+    pl = NetworkPlugin({})
+
+    async def fake_nmap(hosts):
+        return _parse_nmap_xml(_NMAP_XML)
+
+    monkeypatch.setattr(pl, "_nmap_scan", fake_nmap)
+    result = asyncio.run(pl.scan())
+    assert result["method"] == "nmap" and result["scanned"] == 2
+    analysis = asyncio.run(pl.analyze())
+    assert "10.0.0.5" in analysis["live_hosts"]
+    assert analysis["open_ports"]["10.0.0.5"] == [22, 161]
+
+
+def test_scan_tcp_fallback_when_no_nmap(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.5")
+    monkeypatch.setattr(netmod.shutil, "which", lambda b: None)  # no nmap, no snmp
+    pl = NetworkPlugin({})
+
+    async def fake_fallback(hosts):
+        return [
+            {
+                "host": "10.0.0.5",
+                "hostname": "",
+                "state": "up",
+                "ports": [
+                    {
+                        "port": 80,
+                        "protocol": "tcp",
+                        "service": "",
+                        "product": "",
+                        "version": "",
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(pl, "_tcp_fallback", fake_fallback)
+    result = asyncio.run(pl.scan())
+    assert result["method"] == "tcp-fallback" and result["scanned"] == 1
+
+
+def test_parse_snmpwalk():
+    out = ".1.3.6.1.2.1.2.2.1.2.1 lo\n.1.3.6.1.2.1.2.2.1.2.2 eth0\n"
+    assert _parse_snmpwalk(out, "1.3.6.1.2.1.2.2.1.2") == {"1": "lo", "2": "eth0"}
+
+
+def test_snmp_base_args_v2c_and_v3(monkeypatch):
+    assert NetworkPlugin({})._snmp_base_args()[:2] == ["-v2c", "-c"]
+    for k, v in {
+        "NETWORK_SNMP_VERSION": "3",
+        "NETWORK_SNMP_V3_USER": "admin",
+        "NETWORK_SNMP_V3_LEVEL": "authPriv",
+        "NETWORK_SNMP_V3_AUTH_PROTO": "SHA",
+        "NETWORK_SNMP_V3_AUTH_PASS": "authpw",
+        "NETWORK_SNMP_V3_PRIV_PROTO": "AES",
+        "NETWORK_SNMP_V3_PRIV_PASS": "privpw",
+    }.items():
+        monkeypatch.setenv(k, v)
+    assert NetworkPlugin({})._snmp_base_args() == [
+        "-v3",
+        "-u",
+        "admin",
+        "-l",
+        "authPriv",
+        "-a",
+        "SHA",
+        "-A",
+        "authpw",
+        "-x",
+        "AES",
+        "-X",
+        "privpw",
+    ]
+
+
+def test_parse_arp():
+    raw = {"2.10.0.0.9": "0:aa:bb:cc:dd:ee", "3.192.168.1.1": "11 22 33 44 55 66"}
+    assert _parse_arp(raw) == {
+        "10.0.0.9": "0:aa:bb:cc:dd:ee",
+        "192.168.1.1": "11:22:33:44:55:66",
+    }
+
+
+def test_snmp_lookup_comprehensive(monkeypatch):
+    pl = NetworkPlugin({})
+
+    async def fake_run(*cmd, timeout=60.0):
+        tool, oid = cmd[0], cmd[-1]
+        if tool == "snmpget":
+            m = {
+                "1.3.6.1.2.1.1.1.0": "Linux router 5.10",  # sysDescr
+                "1.3.6.1.2.1.1.5.0": "router-01",  # sysName
+                "1.3.6.1.2.1.25.2.2.0": "2048000",  # hrMemorySize
+            }
+            return (0, m[oid] + "\n") if oid in m else (1, "")
+        if tool == "snmpbulkwalk":
+            if oid == _IF_DESCR_OID:
+                return 0, ".1.3.6.1.2.1.2.2.1.2.1 lo\n.1.3.6.1.2.1.2.2.1.2.2 eth0\n"
+            if oid == _IF_OPERSTATUS_OID:
+                return 0, ".1.3.6.1.2.1.2.2.1.8.1 1\n.1.3.6.1.2.1.2.2.1.8.2 1\n"
+            if oid == _IF_MAC_OID:
+                return 0, ".1.3.6.1.2.1.2.2.1.6.2 0:1a:2b:3c:4d:5e\n"
+            if oid == _ARP_MAC_OID:
+                return 0, ".1.3.6.1.2.1.4.22.1.2.2.10.0.0.9 0:aa:bb:cc:dd:ee\n"
+            return 0, ""  # other columns empty
+        return 1, ""
+
+    monkeypatch.setattr(pl, "_run", fake_run)
+    snmp = asyncio.run(pl._snmp_lookup("10.0.0.5"))
+    assert snmp["system"]["sysName"] == "router-01"
+    ifaces = {i["descr"]: i for i in snmp["interfaces"]}
+    assert ifaces["eth0"]["oper_status"] == "up"
+    assert ifaces["eth0"]["mac"] == "0:1a:2b:3c:4d:5e"
+    assert snmp["host_resources"]["memory_kb"] == "2048000"
+    assert snmp["arp"] == {"10.0.0.9": "0:aa:bb:cc:dd:ee"}
+
+
+def test_snmp_lookup_skips_non_snmp_host(monkeypatch):
+    pl = NetworkPlugin({})
+
+    async def fake_run(*cmd, timeout=60.0):
+        return 1, ""  # nothing responds → fast skip
+
+    monkeypatch.setattr(pl, "_run", fake_run)
+    assert asyncio.run(pl._snmp_lookup("10.0.0.9")) == {}
+
+
+def test_empty_targets_scans_nothing(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "")
+    pl = NetworkPlugin({})
+    result = asyncio.run(pl.collect_data())
+    assert result["scanned"] == 0 and result["method"] == "none"
+
+
+# ── change detection + autonomous reconcile fan-out ──────────────────────────
+def test_diff_hosts():
+    prev = {"a": {"ports": [22], "snmp": False}, "b": {"ports": [80], "snmp": False}}
+    curr = {
+        "a": {"ports": [22, 443], "snmp": False},
+        "c": {"ports": [80], "snmp": False},
+    }
+    d = _diff_hosts(prev, curr)
+    assert d["new"] == ["c"]
+    assert d["down"] == ["b"]
+    assert d["changed"] == ["a"]
+
+
+def _canned_collect(pl, hosts):
+    async def fake_collect():
+        pl._last = {
+            "timestamp": "t",
+            "targets": "x",
+            "method": "nmap",
+            "scanned": len(hosts),
+            "hosts": hosts,
+        }
+        return pl._last
+
+    return fake_collect
+
+
+def test_reconcile_fans_out_to_all_enabled_sinks(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.5")
+    pl = NetworkPlugin({})
+    hosts = [
+        {
+            "host": "10.0.0.5",
+            "hostname": "",
+            "state": "up",
+            "ports": [{"port": 80, "protocol": "tcp"}],
+        }
+    ]
+    monkeypatch.setattr(pl, "_discover", _canned_collect(pl, hosts))
+    calls = []
+
+    async def s_tg(live):
+        calls.append("telegraf")
+        return {"status": "applied"}
+
+    async def s_pg(live, ch):
+        calls.append("postgres")
+        return {"status": "ok"}
+
+    async def s_neo(live):
+        calls.append("neo4j")
+        return {"status": "ok"}
+
+    async def s_rmq(ch):
+        calls.append("rabbitmq")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(pl, "_sink_telegraf", s_tg)
+    monkeypatch.setattr(pl, "_sink_postgres", s_pg)
+    monkeypatch.setattr(pl, "_sink_neo4j", s_neo)
+    monkeypatch.setattr(pl, "_sink_rabbitmq", s_rmq)
+    pl._prev = {"9.9.9.9": {"ports": [], "snmp": False}}  # not the first cycle
+    r = asyncio.run(pl.reconcile())
+    assert set(calls) == {"telegraf", "postgres", "neo4j", "rabbitmq"}
+    assert r["changes"]["new"] == ["10.0.0.5"] and r["live"] == 1
+
+
+def test_expanded_eviction_after_misses(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.1")
+    monkeypatch.setenv("NETWORK_EXPAND_MISS_LIMIT", "2")
+    for s in (
+        "NETWORK_AUTO_APPLY",
+        "NETWORK_SINK_POSTGRES",
+        "NETWORK_SINK_NEO4J",
+        "NETWORK_SINK_RABBITMQ",
+    ):
+        monkeypatch.setenv(s, "0")
+    pl = NetworkPlugin({})
+    pl._expanded = {"10.0.0.9"}
+    pl._prev = {"10.0.0.1": {"ports": [], "snmp": False}}  # not first cycle
+    host = {"host": "10.0.0.1", "state": "up", "ports": []}  # 10.0.0.9 never live
+    monkeypatch.setattr(pl, "_discover", _canned_collect(pl, [host]))
+    r1 = asyncio.run(pl.reconcile())
+    assert r1["expanded_evicted"] == [] and pl._expanded == {"10.0.0.9"}  # 1 miss
+    r2 = asyncio.run(pl.reconcile())
+    assert r2["expanded_evicted"] == ["10.0.0.9"] and pl._expanded == set()  # evicted
+
+
+def test_reconcile_first_cycle_suppresses_change_events(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.5")
+    pl = NetworkPlugin({})
+    hosts = [{"host": "10.0.0.5", "state": "up", "ports": [{"port": 80}]}]
+    monkeypatch.setattr(pl, "_discover", _canned_collect(pl, hosts))
+    called = []
+
+    async def s_rmq(ch):
+        called.append("rabbitmq")
+        return {"status": "ok"}
+
+    async def s_pg(live, ch):
+        called.append("postgres")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(pl, "_sink_rabbitmq", s_rmq)
+    monkeypatch.setattr(pl, "_sink_postgres", s_pg)
+    monkeypatch.setattr(pl, "_sink_neo4j", lambda live: _ok())
+    # first cycle (empty _prev): rabbitmq events suppressed, inventory still written
+    r = asyncio.run(pl.reconcile())
+    assert "rabbitmq" not in called and "postgres" in called
+    assert r["changes"]["new"] == ["10.0.0.5"]  # still reported in the result
+
+
+async def _ok():
+    return {"status": "ok"}
+
+
+def test_collect_data_freshness_guard(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.5")
+    pl = NetworkPlugin({})
+    calls = []
+
+    async def fake_discover():
+        calls.append(1)
+        pl._last = {"hosts": [], "method": "nmap", "scanned": 0}
+        pl._last_scan_monotonic = time.monotonic()
+        return pl._last
+
+    monkeypatch.setattr(pl, "_discover", fake_discover)
+    asyncio.run(pl.collect_data())  # first call → scans
+    asyncio.run(pl.collect_data())  # within interval → cached, no re-scan
+    assert len(calls) == 1
+
+
+def test_configured_cidrs():
+    assert _configured_cidrs("10.0.0.0/24, 1.2.3.4 , bad, 192.168.0.0/16") == [
+        "10.0.0.0/24",
+        "192.168.0.0/16",
+    ]
+
+
+def test_extract_neighbor_ips_in_cidr_only():
+    hosts = [
+        {"snmp": {"arp": {"10.0.0.5": "m1", "10.0.0.9": "m2", "192.168.1.1": "m3"}}}
+    ]
+    assert _extract_neighbor_ips(hosts, ["10.0.0.0/29"]) == ["10.0.0.5"]
+    assert _extract_neighbor_ips(hosts, []) == []
+
+
+def test_reconcile_auto_expand(monkeypatch):
+    monkeypatch.setenv("NETWORK_SCAN_TARGETS", "10.0.0.1")
+    monkeypatch.setenv("NETWORK_AUTO_EXPAND", "1")
+    monkeypatch.setenv("NETWORK_EXPAND_CIDRS", "10.0.0.0/29")
+    for s in (
+        "NETWORK_AUTO_APPLY",
+        "NETWORK_SINK_POSTGRES",
+        "NETWORK_SINK_NEO4J",
+        "NETWORK_SINK_RABBITMQ",
+    ):
+        monkeypatch.setenv(s, "0")
+    pl = NetworkPlugin({})
+    host = {
+        "host": "10.0.0.1",
+        "state": "up",
+        "ports": [{"port": 161, "protocol": "tcp"}],
+        "snmp": {"arp": {"10.0.0.5": "m1", "10.0.0.9": "m2", "192.168.1.1": "m3"}},
+    }
+    monkeypatch.setattr(pl, "_discover", _canned_collect(pl, [host]))
+    r = asyncio.run(pl.reconcile())
+    # only the in-CIDR, not-already-scanned neighbour is folded into scope
+    assert r["expanded_added"] == ["10.0.0.5"]
+    assert pl._expanded == {"10.0.0.5"}
+    assert "10.0.0.5" in pl._effective_targets()
+
+
+def test_reconcile_auto_apply_off_and_sinks_off(monkeypatch):
+    for var in (
+        "NETWORK_AUTO_APPLY",
+        "NETWORK_SINK_POSTGRES",
+        "NETWORK_SINK_NEO4J",
+        "NETWORK_SINK_RABBITMQ",
+    ):
+        monkeypatch.setenv(var, "0")
+    pl = NetworkPlugin({})
+    hosts = [{"host": "10.0.0.5", "state": "up", "ports": []}]
+    monkeypatch.setattr(pl, "_discover", _canned_collect(pl, hosts))
+    called = []
+
+    async def s_tg(live):
+        called.append("telegraf")
+        return {}
+
+    monkeypatch.setattr(pl, "_sink_telegraf", s_tg)
+    r = asyncio.run(pl.reconcile())
+    assert called == []  # AUTO_APPLY=0 → telegraf skipped; other sinks off
+    assert r["sinks"] == {}
+
+
+def test_run_kills_process_on_timeout(monkeypatch):
+    """A timed-out subprocess must be killed + reaped, not left orphaned (regression)."""
+    pl = NetworkPlugin({})
+
+    fake_proc = MagicMock()
+    fake_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError())
+    fake_proc.kill = MagicMock()
+    fake_proc.wait = AsyncMock()
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        return fake_proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    rc, out = asyncio.run(pl._run("nmap", "-sT", timeout=0.01))
+
+    assert (rc, out) == (1, "")
+    fake_proc.kill.assert_called_once()
+    fake_proc.wait.assert_awaited_once()
+
+
+def test_sink_postgres_connect_failure_omits_raw_message(monkeypatch):
+    """The 'error' field must be the exception TYPE only -- connection errors can
+    embed host/user/password details that shouldn't reach an API response."""
+    import asyncpg
+
+    pl = NetworkPlugin({})
+
+    async def _boom(**kwargs):
+        raise OSError(
+            "connection to server at postgres:5432, user minder, "
+            "password 'hunter2' failed"
+        )
+
+    monkeypatch.setattr(asyncpg, "connect", _boom)
+    result = asyncio.run(pl._sink_postgres([], {}))
+
+    assert result["status"] == "error"
+    assert result["error"] == "OSError"
+    assert "hunter2" not in str(result)

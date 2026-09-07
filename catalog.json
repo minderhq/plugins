@@ -1,6 +1,6 @@
 {
   "source": "minderhq/plugins",
-  "count": 11,
+  "count": 13,
   "plugins": [
     {
       "package": "arxiv",
@@ -359,6 +359,55 @@
       }
     },
     {
+      "package": "network",
+      "name": "network",
+      "version": "1.0.0",
+      "description": "Autonomous nmap+SNMP discovery; inventories & monitors found hosts.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "ai-tools",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "ui_schema": {},
+      "ai_tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "network_scan",
+            "description": "Scan the configured network targets with nmap (open ports, service and version detection) and refresh the host/service inventory.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "network_reconcile",
+            "description": "Run the network plugin's discover-then-act reconcile cycle: scan, then fan findings into telegraf/PostgreSQL/Neo4j.",
+            "parameters": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          }
+        }
+      ],
+      "display": {}
+    },
+    {
       "package": "news",
       "name": "news",
       "version": "1.0.0",
@@ -595,6 +644,29 @@
           }
         }
       ],
+      "display": {}
+    },
+    {
+      "package": "telegraf",
+      "name": "telegraf",
+      "version": "1.0.0",
+      "description": "Manages the telegraf config's managed region and reloads telegraf.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": []
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "ui_schema": {},
+      "ai_tools": [],
       "display": {}
     },
     {
