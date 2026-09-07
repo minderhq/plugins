@@ -1,4 +1,4 @@
-"""Unit tests filling network plugin's sink coverage gaps (src/plugins/network,
+"""Unit tests filling network plugin's sink coverage gaps (this repo's network/,
 76% coverage after test_network_plugin_lifecycle_coverage.py -- this file's
 follow-up, covering the four fan-out sinks: _sink_telegraf/_sink_postgres/
 _sink_neo4j/_sink_rabbitmq (~180 lines, previously almost entirely untested).

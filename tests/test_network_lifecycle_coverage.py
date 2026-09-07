@@ -1,5 +1,5 @@
 """Unit tests filling network plugin's lifecycle/scan-backend coverage gaps
-(src/plugins/network, 58% coverage).
+(this repo's network/, 58% coverage).
 
 test_network_plugin.py already covers the pure helpers and orchestration with
 `_nmap_scan`/`_tcp_fallback` themselves MOCKED OUT (only ever asserting on
