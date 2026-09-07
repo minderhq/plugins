@@ -1,0 +1,57 @@
+name: Submit a plugin
+description: Propose a new plugin for the catalog (see CONTRIBUTING.md for the full walkthrough — this form is a checklist, not a substitute for the PR itself).
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A plugin lands via a **PR that adds `<name>/__init__.py`** (plus tests
+        and a `catalog.json` refresh) — this issue is for proposing/tracking
+        one before or alongside that PR, not a replacement for it. See
+        [CONTRIBUTING.md](../../CONTRIBUTING.md) for the scaffold → validate →
+        PR steps CI enforces mechanically.
+  - type: input
+    id: name
+    attributes:
+      label: Plugin name
+      placeholder: e.g. arxiv
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What does it do?
+      description: One or two sentences — this becomes the catalog `description` field.
+    validations:
+      required: true
+  - type: dropdown
+    id: capabilities
+    attributes:
+      label: Capabilities
+      description: Which of these does it declare? (see minder-plugin-sdk's PluginMetadata)
+      multiple: true
+      options:
+        - actions
+        - ai-tools
+        - config
+        - data-source
+        - display
+    validations:
+      required: true
+  - type: textarea
+    id: requires
+    attributes:
+      label: External requirements
+      description: Any API keys, services, or optional bundles it needs (maps to `REQUIRES`). Write "none" if self-contained.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Before opening the PR
+      options:
+        - label: Scaffolded from minderhq/plugin-template or `minder-plugin scaffold <name>`
+        - label: Passes `minder-plugin validate <name>/__init__.py` locally
+        - label: Has tests (pytest auto-discovers them; a failing test means catalog.json is stale)
+        - label: `catalog.json` regenerated via `python scripts/gen_catalog.py`
+        - label: No secrets/API keys committed (CI's Secrets Scan will catch this, but check locally first)
