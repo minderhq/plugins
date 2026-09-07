@@ -653,13 +653,11 @@ class NetworkPlugin:
                 "set_config('app.is_platform', 'off', false)",
                 self.tenant_id,
             )
-            await conn.execute(
-                """CREATE TABLE IF NOT EXISTS network_inventory (
+            await conn.execute("""CREATE TABLE IF NOT EXISTS network_inventory (
                     ip TEXT PRIMARY KEY, hostname TEXT, os TEXT,
                     ports JSONB, snmp JSONB, status TEXT DEFAULT 'up',
                     first_seen TIMESTAMPTZ DEFAULT NOW(),
-                    last_seen TIMESTAMPTZ DEFAULT NOW())"""
-            )
+                    last_seen TIMESTAMPTZ DEFAULT NOW())""")
             # #984: tenant-scope the inventory. An IP is only unique WITHIN a tenant
             # (two orgs may each scan 192.168.1.x), so the PK moves ip -> (tenant_id,
             # ip). Idempotent migration: add the column (default '' for legacy rows =
