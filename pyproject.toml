@@ -15,7 +15,10 @@ py-modules = []
 
 [project.optional-dependencies]
 dev = [
-    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk@v0.1.0",
+    # Pinned past v0.1.0 to a specific commit (not a new tag -- this repo's
+    # own CHANGELOG: no routine version bumps pre-1.0) for the
+    # package-style-plugin validate/inspect fix `network` needs (plugin-sdk#26).
+    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk@66d1ac96f9a19c2fbbd8b4a3d59fe97018350823",
     "httpx>=0.27",
     "defusedxml>=0.7",
     "pytest>=8",
