@@ -2,7 +2,7 @@
 
 Everything here is side-effect-free (no subprocess, no network) and unit-tested in
 isolation. ``__init__`` imports these (and re-exposes them), so both the plugin and
-the tests reference them via ``plugins.network``. Names keep their ``_`` prefix to
+the tests reference them via ``network``. Names keep their ``_`` prefix to
 match their long-standing use as network-plugin internals.
 """
 
@@ -155,7 +155,7 @@ def _telegraf_config(
     per-tenant queryable/isolated in InfluxDB.
 
     NOTE: consumed by the telegraf plugin's set_managed_region(), which validates it
-    as TOML — keep the output valid TOML (see src/plugins/telegraf)."""
+    as TOML — keep the output valid TOML (see ../telegraf)."""
     tag_block = f'  [inputs.{{input}}.tags]\n    tenant_id = "{tenant_id}"'
     blocks: List[str] = []
     for h in hosts:
