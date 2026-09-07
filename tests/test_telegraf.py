@@ -1,4 +1,4 @@
-"""Unit tests for the telegraf config-manager plugin (src/plugins/telegraf).
+"""Unit tests for the telegraf config-manager plugin (this repo's telegraf/).
 
 Pure-logic coverage — managed-region parsing, TOML validation, marker guards — with
 a temp config file. No Docker: reload=False keeps every call off the docker socket.
