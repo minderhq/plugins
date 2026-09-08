@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: minderhq/plugin-sdk
+    url: https://github.com/minderhq/plugin-sdk
+    about: If this is about the SDK itself (contract API, schema compiler) rather than a specific plugin, it may belong there instead.
+  - name: minderhq/plugin-template
+    url: https://github.com/minderhq/plugin-template
+    about: Want to add a new plugin? Start from the template repo, not this one.
