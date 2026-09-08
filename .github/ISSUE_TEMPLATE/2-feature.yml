@@ -1,0 +1,33 @@
+name: Feature request / new plugin proposal
+description: Propose an enhancement to an existing plugin, or a new plugin for the catalog
+title: "[feature]: "
+type: Feature
+labels: ["status:triage"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Is this a new plugin proposal or an enhancement to an existing one?
+      options:
+        - New plugin proposal
+        - Enhancement to an existing plugin
+        - Catalog/tooling improvement (CI, packaging, validation)
+    validations:
+      required: true
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin name (existing plugin to enhance, or proposed name for a new one)
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem does this solve? Who is affected?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
