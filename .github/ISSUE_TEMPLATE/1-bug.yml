@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a defect in an existing plugin — existing behavior is wrong or broken
+title: "[bug]: "
+type: Bug
+labels: ["status:triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A maintainer will triage and label this during review.
+  - type: input
+    id: plugin
+    attributes:
+      label: Which plugin?
+      description: The top-level directory name, e.g. "crypto", "network", "arxiv".
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What's wrong?
+      description: A clear description of the defect.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment & logs
+      render: shell
