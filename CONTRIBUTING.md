@@ -25,4 +25,4 @@ submitted plugin earns a paid tier is a product decision, tracked separately
 in this repo's #31, not something this guide can answer yet.
 
 Design & contract: https://github.com/minderhq/plugin-sdk
-Governance: https://github.com/minderhq/minder/blob/main/docs/development/issue-and-pr-conventions.md
+Publishing & review flow: https://minderhq.github.io/docs/plugins/publishing/
