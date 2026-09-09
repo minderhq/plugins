@@ -4,6 +4,9 @@ The **catalog** of [Minder](https://github.com/minderhq/minder) plugins —
 first-party and community — each validated against the
 [plugin-sdk](https://github.com/minderhq/plugin-sdk).
 
+See the [plugin docs](https://minderhq.github.io/docs/plugins/) — authoring, the
+contract, and [publishing to this catalog](https://minderhq.github.io/docs/plugins/publishing/).
+
 Every plugin lives in its own top-level directory as a package:
 
 ```
