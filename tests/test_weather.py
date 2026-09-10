@@ -4,6 +4,7 @@ None paths), and the get_weather / collect_data entry points. HTTP is faked.
 """
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,6 +42,25 @@ def _json_client(payload, *, raise_on_get=False):
     return _FakeClient
 
 
+def _post_client(*, raise_on_post=False):
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, params=None, headers=None, content=None):
+            if raise_on_post:
+                raise RuntimeError("boom")
+            return _FakeResp(None)
+
+    return _FakeClient
+
+
 # ── _parse_locations ─────────────────────────────────────────────────────────
 def test_parse_locations_triples():
     out = WeatherPlugin._parse_locations("Istanbul:41.0:28.9, Ankara:39.9:32.8")
@@ -67,6 +87,41 @@ def test_apply_config_sink_bool_coercion(value, expected):
     p = WeatherPlugin()
     p.apply_config({"WEATHER_SINK_INFLUXDB": value})
     assert p.sink_influxdb is expected
+
+
+def test_apply_config_maps_all_keys_at_once():
+    p = WeatherPlugin()
+    p.apply_config(
+        {"WEATHER_LOCATIONS": "Tokyo:35.68:139.69", "WEATHER_SINK_INFLUXDB": False}
+    )
+    assert p.locations == [("Tokyo", 35.68, 139.69)]
+    assert p.sink_influxdb is False
+
+
+def test_init_default_locations_bootstrap():
+    p = WeatherPlugin()
+    assert p.locations == [("Istanbul", 41.01, 28.98), ("London", 51.51, -0.13)]
+    assert p.sink_influxdb is True
+
+
+# ── lifecycle ────────────────────────────────────────────────────────────────
+def test_register_and_health():
+    p = WeatherPlugin()
+    md = asyncio.run(p.register())
+    assert md.name == "weather"
+    h = asyncio.run(p.health_check())
+    assert h["healthy"] is True
+    assert set(h["locations"]) == {n for n, _, _ in p.locations}
+    assert h["influxdb_sink"] is p.sink_influxdb
+
+
+def test_lifecycle_status_transitions():
+    p = WeatherPlugin()
+    assert p.status == "registered"
+    asyncio.run(p.initialize())
+    assert p.status == "ready"
+    asyncio.run(p.shutdown())
+    assert p.status == "shutdown"
 
 
 # ── _fetch_current ───────────────────────────────────────────────────────────
@@ -245,3 +300,114 @@ def test_write_influxdb_emits_float_fields_not_integers(monkeypatch):
         == "weather,location=Ankara temperature=5.0,humidity=2.0,wind_speed=3.0"
     )
     assert "i," not in cap["content"] and not cap["content"].rstrip().endswith("i")
+
+
+# ── _write_influxdb gating / fail-soft ───────────────────────────────────────
+_READING = {"Istanbul": {"temperature": 20, "humidity": 50, "wind_speed": 5}}
+
+
+def test_write_influxdb_noop_when_sink_disabled():
+    p = WeatherPlugin()
+    p.sink_influxdb = False
+    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb(_READING)) is False
+
+
+def test_write_influxdb_noop_when_influxdb_not_enabled():
+    p = WeatherPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": False}}
+    assert asyncio.run(p._write_influxdb(_READING)) is False
+
+
+def test_write_influxdb_noop_when_readings_empty():
+    p = WeatherPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb({})) is False
+
+
+def test_write_influxdb_noop_when_no_numeric_fields():
+    # all-None readings produce no line-protocol lines → nothing to write.
+    p = WeatherPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    readings = {"Istanbul": {"temperature": None, "humidity": None, "wind_speed": None}}
+    assert asyncio.run(p._write_influxdb(readings)) is False
+
+
+def test_write_influxdb_failure_returns_false(monkeypatch):
+    p = WeatherPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    monkeypatch.setattr(weather.httpx, "AsyncClient", _post_client(raise_on_post=True))
+    assert asyncio.run(p._write_influxdb(_READING)) is False
+
+
+# ── collect_data aggregation / analyze / refresh ─────────────────────────────
+def test_collect_data_aggregates_across_locations(monkeypatch):
+    p = WeatherPlugin()
+    p.locations = [("A", 1.0, 1.0), ("B", 2.0, 2.0)]
+
+    async def fake_fetch(lat, lon):
+        return {"temperature": lat, "humidity": 50, "wind_speed": 5}
+
+    monkeypatch.setattr(p, "_fetch_current", fake_fetch)
+    monkeypatch.setattr(p, "_write_influxdb", AsyncMock(return_value=False))
+    result = asyncio.run(p.collect_data())
+    assert result["readings"] == {
+        "A": {"temperature": 1.0, "humidity": 50, "wind_speed": 5},
+        "B": {"temperature": 2.0, "humidity": 50, "wind_speed": 5},
+    }
+    assert result["influxdb_written"] is False
+    assert p._last == result
+
+
+def test_collect_data_calls_write_influxdb_with_readings(monkeypatch):
+    p = WeatherPlugin()
+    p.locations = [("A", 1.0, 1.0)]
+    monkeypatch.setattr(
+        p,
+        "_fetch_current",
+        AsyncMock(return_value={"temperature": 1, "humidity": 1, "wind_speed": 1}),
+    )
+    write_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(p, "_write_influxdb", write_mock)
+    result = asyncio.run(p.collect_data())
+    write_mock.assert_awaited_once_with(result["readings"])
+    assert result["influxdb_written"] is True
+
+
+def test_analyze_before_any_collection():
+    p = WeatherPlugin()
+    out = asyncio.run(p.analyze())
+    assert out["message"] == "no data collected yet"
+    assert set(out["locations"]) == {n for n, _, _ in p.locations}
+
+
+def test_analyze_returns_last_collection(monkeypatch):
+    p = WeatherPlugin()
+    p.locations = [("A", 1.0, 1.0)]
+    monkeypatch.setattr(
+        p,
+        "_fetch_current",
+        AsyncMock(return_value={"temperature": 1, "humidity": 1, "wind_speed": 1}),
+    )
+    monkeypatch.setattr(p, "_write_influxdb", AsyncMock(return_value=False))
+    asyncio.run(p.collect_data())
+    assert asyncio.run(p.analyze()) == p._last
+
+
+def test_refresh_calls_collect_data(monkeypatch):
+    p = WeatherPlugin()
+    monkeypatch.setattr(p, "collect_data", AsyncMock(return_value={"ok": True}))
+    assert asyncio.run(p.refresh()) == {"ok": True}
+
+
+def test_get_weather_geocode_lat_none_returns_error(monkeypatch):
+    # _geocode can return a (None, lon) tuple; the `coords[0] is None` guard must
+    # still treat it as unresolved rather than fetching with a None latitude.
+    p = WeatherPlugin()
+    monkeypatch.setattr(p, "_geocode", AsyncMock(return_value=(None, 1.0)))
+    out = asyncio.run(p.get_weather("Nowhere"))
+    assert out == {"location": "Nowhere", "error": "could not resolve location"}
