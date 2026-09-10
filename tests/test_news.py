@@ -6,6 +6,7 @@ and the get_news / collect_data entry points. All HTTP is faked; no network.
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -84,6 +85,13 @@ def test_parse_feeds_empty_spec():
     assert NewsPlugin._parse_feeds("   ") == []
 
 
+def test_parse_feeds_url_may_contain_query_colon():
+    # partition(":") splits only the first ':' — a ':' inside the URL query
+    # (e.g. a range param) must stay part of the URL, not truncate it.
+    out = NewsPlugin._parse_feeds("a:https://x.example/rss?x=1:2")
+    assert out == [("a", "https://x.example/rss?x=1:2")]
+
+
 # ── apply_config coercion ────────────────────────────────────────────────────
 def test_apply_config_max_items_bad_value_falls_back_to_10(monkeypatch):
     p = _plugin(monkeypatch)
@@ -110,6 +118,48 @@ def test_apply_config_sink_bool_coercion(monkeypatch, value, expected):
     p = _plugin(monkeypatch)
     p.apply_config({"NEWS_SINK_INFLUXDB": value})
     assert p.sink_influxdb is expected
+
+
+def test_apply_config_maps_all_keys_at_once(monkeypatch):
+    p = _plugin(monkeypatch)
+    p.apply_config(
+        {
+            "NEWS_FEEDS": "a:https://a.example/rss",
+            "NEWS_MAX_ITEMS": "3",
+            "NEWS_SINK_INFLUXDB": False,
+        }
+    )
+    assert p.feeds == [("a", "https://a.example/rss")]
+    assert p.max_items == 3
+    assert p.sink_influxdb is False
+
+
+def test_init_default_feeds_are_all_https():
+    # #370: the default mix must be non-empty and every entry https-only, since
+    # the fetcher rejects non-https feeds outright.
+    p = NewsPlugin()
+    assert p.feeds
+    assert all(url.startswith("https://") for _, url in p.feeds)
+
+
+# ── lifecycle ────────────────────────────────────────────────────────────────
+def test_register_and_health():
+    p = NewsPlugin()
+    md = asyncio.run(p.register())
+    assert md.name == "news"
+    h = asyncio.run(p.health_check())
+    assert h["healthy"] is True
+    assert set(h["feeds"]) == {n for n, _ in p.feeds}
+    assert h["influxdb_sink"] is p.sink_influxdb
+
+
+def test_lifecycle_status_transitions():
+    p = NewsPlugin()
+    assert p.status == "registered"
+    asyncio.run(p.initialize())
+    assert p.status == "ready"
+    asyncio.run(p.shutdown())
+    assert p.status == "shutdown"
 
 
 # ── _fetch_feed parsing ──────────────────────────────────────────────────────
@@ -194,6 +244,104 @@ def test_collect_data_aggregates_counts_and_gates_influx(monkeypatch):
     assert res["counts"] == {"bbc": 2, "hn": 2}
     assert res["influxdb_written"] is False
     assert set(res["headlines"]) == {"bbc", "hn"}
+    assert p._last == res
+
+
+def test_collect_data_skips_feeds_with_no_items(monkeypatch):
+    p = _plugin(monkeypatch)
+    p.feeds = [("empty", "https://empty.example/rss")]
+    monkeypatch.setattr(p, "_fetch_feed", AsyncMock(return_value=[]))
+    monkeypatch.setattr(p, "_write_influxdb", AsyncMock(return_value=False))
+    res = asyncio.run(p.collect_data())
+    assert res["headlines"] == {}
+    assert res["counts"] == {}
+
+
+# ── analyze / refresh ────────────────────────────────────────────────────────
+def test_analyze_before_any_collection():
+    p = NewsPlugin()
+    out = asyncio.run(p.analyze())
+    assert out["message"] == "no data collected yet"
+    assert out["feeds"] == [n for n, _ in p.feeds]
+
+
+def test_analyze_returns_last_collection(monkeypatch):
+    p = _plugin(monkeypatch)
+    p.feeds = [("a", "https://a.example/rss")]
+    monkeypatch.setattr(
+        p,
+        "_fetch_feed",
+        AsyncMock(return_value=[{"title": "t", "link": "", "published": ""}]),
+    )
+    monkeypatch.setattr(p, "_write_influxdb", AsyncMock(return_value=False))
+    asyncio.run(p.collect_data())
+    assert asyncio.run(p.analyze()) == p._last
+
+
+def test_refresh_calls_collect_data(monkeypatch):
+    p = _plugin(monkeypatch)
+    monkeypatch.setattr(p, "collect_data", AsyncMock(return_value={"ok": True}))
+    assert asyncio.run(p.refresh()) == {"ok": True}
+
+
+# ── _write_influxdb (plugin-local sink, not the SDK helper) ──────────────────
+class _WriteClient:
+    """httpx.AsyncClient stand-in that records a POST (or raises)."""
+
+    def __init__(self, *a, exc=None, **k):
+        self._exc = exc
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, **kwargs):
+        if self._exc:
+            raise self._exc
+        return _FakeResp("")
+
+
+def test_write_influxdb_noop_when_sink_disabled():
+    p = NewsPlugin()
+    p.sink_influxdb = False
+    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb({"a": 1})) is False
+
+
+def test_write_influxdb_noop_when_influxdb_not_enabled():
+    p = NewsPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": False}}
+    assert asyncio.run(p._write_influxdb({"a": 1})) is False
+
+
+def test_write_influxdb_noop_when_counts_empty():
+    p = NewsPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb({})) is False
+
+
+def test_write_influxdb_success(monkeypatch):
+    p = NewsPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True, "host": "h", "port": 1, "token": "t"}}
+    monkeypatch.setattr(news.httpx, "AsyncClient", _WriteClient)
+    assert asyncio.run(p._write_influxdb({"feed a": 3})) is True
+
+
+def test_write_influxdb_failure_returns_false(monkeypatch):
+    p = NewsPlugin()
+    p.sink_influxdb = True
+    p.config = {"influxdb": {"enabled": True}}
+    monkeypatch.setattr(
+        news.httpx,
+        "AsyncClient",
+        lambda *a, **k: _WriteClient(exc=RuntimeError("boom")),
+    )
+    assert asyncio.run(p._write_influxdb({"a": 1})) is False
 
 
 # ── _is_safe_feed_url: the real SSRF classification (#370) ────────────────────
@@ -239,10 +387,12 @@ def test_is_safe_feed_url_rejects_non_https_or_hostless(monkeypatch, url):
     [
         "127.0.0.1",  # loopback
         "10.0.0.5",  # private (RFC1918)
+        "172.16.0.1",  # private (RFC1918)
         "192.168.1.1",  # private
         "169.254.169.254",  # link-local -- the cloud-metadata endpoint
         "240.0.0.1",  # reserved
         "224.0.0.1",  # multicast
+        "::1",  # IPv6 loopback
     ],
 )
 def test_is_safe_feed_url_rejects_internal_addresses(monkeypatch, ip):
