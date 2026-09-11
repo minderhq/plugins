@@ -1,6 +1,6 @@
 {
   "source": "minderhq/plugins",
-  "count": 13,
+  "count": 14,
   "plugins": [
     {
       "package": "arxiv",
@@ -724,6 +724,119 @@
         }
       ],
       "display": {}
+    },
+    {
+      "package": "webcrawl",
+      "name": "webcrawl",
+      "version": "1.0.0",
+      "description": "Connector: crawls configured public URLs, extracts readable text, and ingests it into a knowledge base via the rag upload API.",
+      "author": "Minder <core@minder.local>",
+      "capabilities": [
+        "actions",
+        "config",
+        "data-source"
+      ],
+      "requires": {
+        "services": [],
+        "optional_services": [],
+        "bundles": [
+          "rag"
+        ]
+      },
+      "config_schema": {
+        "type": "object",
+        "properties": {
+          "WEBCRAWL_KB_ID": {
+            "type": "string",
+            "default": "",
+            "description": "Target knowledge base id to ingest crawled pages into."
+          },
+          "WEBCRAWL_URLS": {
+            "type": "string",
+            "default": "",
+            "description": "Seed URLs to crawl, comma-separated. Each must be http(s) and resolve to a public address \u2014 others are skipped at fetch time."
+          },
+          "WEBCRAWL_MAX_DEPTH": {
+            "type": "integer",
+            "default": 0,
+            "description": "Shallow same-domain crawl depth (0 = only the seed URLs).",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "WEBCRAWL_MAX_PAGES": {
+            "type": "integer",
+            "default": 20,
+            "description": "Hard cap on total pages fetched per run.",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "WEBCRAWL_MAX_BYTES": {
+            "type": "integer",
+            "default": 2000000,
+            "description": "Per-page download/processing cap in bytes."
+          },
+          "WEBCRAWL_RATE_LIMIT": {
+            "type": "number",
+            "default": 1.0,
+            "description": "Politeness delay between fetches, in seconds."
+          },
+          "WEBCRAWL_RAG_URL": {
+            "type": "string",
+            "default": "http://minder-rag-pipeline:8004",
+            "description": "rag-pipeline base URL the upload call targets."
+          },
+          "WEBCRAWL_SERVICE_TOKEN": {
+            "type": "string",
+            "default": "",
+            "description": "X-Service-Token for the internal upload call (matches rag-pipeline's SERVICE_SYNC_TOKEN). Leave blank if the upload endpoint is reached with a user JWT instead."
+          }
+        }
+      },
+      "ui_schema": {
+        "WEBCRAWL_KB_ID": {
+          "ui:widget": "text",
+          "ui:group": "Target"
+        },
+        "WEBCRAWL_URLS": {
+          "ui:widget": "textarea",
+          "ui:options": {
+            "rows": 3
+          },
+          "ui:group": "Source"
+        },
+        "WEBCRAWL_MAX_DEPTH": {
+          "ui:widget": "number",
+          "ui:group": "Crawl bounds"
+        },
+        "WEBCRAWL_MAX_PAGES": {
+          "ui:widget": "number",
+          "ui:group": "Crawl bounds"
+        },
+        "WEBCRAWL_MAX_BYTES": {
+          "ui:widget": "number",
+          "ui:group": "Crawl bounds"
+        },
+        "WEBCRAWL_RATE_LIMIT": {
+          "ui:widget": "number",
+          "ui:group": "Crawl bounds"
+        },
+        "WEBCRAWL_RAG_URL": {
+          "ui:widget": "text",
+          "ui:group": "Target"
+        },
+        "WEBCRAWL_SERVICE_TOKEN": {
+          "ui:widget": "secret",
+          "ui:group": "Target"
+        }
+      },
+      "ai_tools": [],
+      "display": {
+        "label": "Web Crawl",
+        "summary": "Connector: crawl a configured list of public URLs and ingest the extracted text into a knowledge base.",
+        "logo": "globe",
+        "color": "#2563eb",
+        "category": "connector"
+      }
     },
     {
       "package": "wikipedia",

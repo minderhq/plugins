@@ -57,6 +57,7 @@ handlers (or a declarative manifest), never uploaded code.
 | [`tefas_funds`](tefas_funds) | Keyless TEFAS (Turkish fund) daily prices → InfluxDB + a `get_fund_price` AI tool. |
 | [`telegraf`](telegraf) | Manages telegraf's config "managed region" + reloads it. Minder's own first-party infra plugin. |
 | [`weather`](weather) | Keyless Open-Meteo current-conditions time series + a `get_weather` AI tool. |
+| [`webcrawl`](webcrawl) | Connector: crawls a configured list of public URLs (optional shallow same-domain depth), extracts readable text, and ingests it into a knowledge base via the rag upload API. SSRF-guarded + bounded crawl. |
 | [`wikipedia`](wikipedia) | Keyless Wikipedia article-summary lookup, exposed as a `wiki_summary` AI tool (a "Talent"). |
 
 ## Running inside a live Minder instance
