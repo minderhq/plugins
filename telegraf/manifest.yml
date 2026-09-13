@@ -1,0 +1,17 @@
+# Bundle claim-graph declaration for the telegraf plugin (#1626).
+#
+# This plugin manages the `telegraf` Compose service's config and can restart it
+# (see __init__.py) -- that service is labeled `minder.bundle=monitoring` in
+# docker-compose.yml, so this plugin's own functionality genuinely depends on the
+# `monitoring` bundle being enabled. This is the first real (non-synthetic) use of
+# shared.bundle_graph's plugin-manifest claim source (`claims_from_plugin_manifests`)
+# -- every other first-party plugin still ships with no manifest.yml at all.
+#
+# This file carries ONLY the bundle claim-graph fields; it is not a full manifest
+# (no `ai_tools`, `name`, `version`, `description`, `author` here) -- the plugin is
+# still loaded as a MODULE plugin (via its __init__.py), and
+# core/marketplace_sync.py's sync_plugin_ai_tools falls back to that module's real
+# PluginMetadata for everything this file doesn't declare.
+bundle: monitoring
+claims:
+  - service: telegraf
