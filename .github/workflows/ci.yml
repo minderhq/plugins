@@ -21,10 +21,10 @@ permissions:
 
 jobs:
   validate:
-    # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request
-    # (including from forks -- this repo is public) stays on GitHub-hosted so an
-    # external contributor's PR never executes on our infrastructure.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","Linux","X64","org-shared"]') || 'ubuntu-latest' }}
+    # Always GitHub-hosted: this public repo's self-hosted push CI queued behind
+    # the org runner group's allows_public_repositories=false gate and never ran.
+    # Hosted is free for public repos; fork PRs already ran hosted.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +80,7 @@ jobs:
     # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request
     # (including from forks -- this repo is public) stays on GitHub-hosted, same
     # split as `validate` above.
-    runs-on: ${{ github.event_name == 'push' && fromJSON('["self-hosted","Linux","X64","org-shared"]') || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
