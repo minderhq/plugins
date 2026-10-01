@@ -487,7 +487,7 @@ def test_sink_postgres_connect_failure_omits_raw_message(monkeypatch):
     embed host/user/password details that shouldn't reach an API response."""
     import asyncpg
 
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"database": {"user": "minder_plugins", "password": "pw"}})
 
     async def _boom(**kwargs):
         raise OSError(

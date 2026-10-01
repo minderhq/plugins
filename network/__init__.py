@@ -628,14 +628,25 @@ class NetworkPlugin:
             import asyncpg
         except ImportError:
             return {"status": "unavailable"}
+        # minderhq/minder#2045: connect with the database handle the registry
+        # passes in (a least-privilege role confined to the plugin schema), never
+        # the platform owner credentials from the process env. No handle -> skip.
+        db = self.config.get("database") or {}
+        if not db.get("user") or not db.get("password"):
+            return {"status": "no-database"}
         try:
             conn = await asyncpg.connect(
-                host=os.environ.get("POSTGRES_HOST", "postgres"),
-                port=int(os.environ.get("POSTGRES_PORT", "5432")),
-                user=os.environ.get("POSTGRES_USER", "minder"),
-                password=os.environ.get("POSTGRES_PASSWORD", ""),
-                database=os.environ.get("POSTGRES_DB", "minder"),
+                host=db.get("host", "postgres"),
+                port=int(db.get("port", 5432)),
+                user=db["user"],
+                password=db["password"],
+                database=db.get("database", "minder"),
                 timeout=8,
+                # The plugin-owned schema (the role's search_path already points
+                # there); network_inventory is created/queried unqualified in it.
+                server_settings=(
+                    {"search_path": db["schema"]} if db.get("schema") else None
+                ),
             )
         except (
             Exception
