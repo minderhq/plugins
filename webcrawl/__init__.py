@@ -78,10 +78,29 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
 # ── SSRF guard (module-level so it is independently testable / stubbable) ─────
+def _is_public_address(raw: str) -> bool:
+    """True only for a globally routable unicast address.
+
+    ``not is_global`` also rejects ranges the narrower private/loopback/...
+    checks miss: 100.64.0.0/10 shared address space (CGNAT, which Tailscale
+    tailnets use), documentation and benchmarking ranges. IPv4-mapped IPv6
+    (``::ffff:127.0.0.1``) is unwrapped first so it can't smuggle a private
+    IPv4 address through. Same rule as Minder core's own guard.
+    """
+    try:
+        ip = ipaddress.ip_address(raw.split("%", 1)[0])  # drop an IPv6 zone id
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
 async def _is_safe_url(url: str) -> bool:
-    """http(s)-only + reject any host that resolves to a private / loopback /
-    link-local / reserved / multicast / unspecified address (RFC1918, 127/8,
-    169.254/16 incl. the cloud-metadata endpoint, etc.).
+    """http(s)-only, and the host must resolve exclusively to globally routable
+    unicast addresses (see ``_is_public_address``): no RFC1918, loopback,
+    link-local / cloud-metadata (169.254.169.254), CGNAT/Tailscale, reserved,
+    documentation, multicast or unspecified targets.
 
     WEBCRAWL_URLS is JWT-gated config, but this platform's trust boundaries are
     loose (single-tenant / self-hosted), so a leaked token shouldn't be able to
@@ -95,23 +114,12 @@ async def _is_safe_url(url: str) -> bool:
         return False
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(parts.hostname, None)
-    except OSError:
+    except (OSError, UnicodeError):
         return False
     if not infos:
         return False
     for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+        if not _is_public_address(str(info[4][0])):
             return False
     return True
 
