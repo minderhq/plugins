@@ -198,6 +198,15 @@ def test_is_safe_url_rejects_bad_scheme_or_hostless(monkeypatch, url):
         "224.0.0.1",  # multicast
         "0.0.0.0",  # unspecified
         "::1",  # ipv6 loopback
+        # Missed by the old private/loopback/... checks; caught by `not is_global`:
+        "100.64.0.1",  # CGNAT shared address space (Tailscale tailnets)
+        "100.101.102.103",  # CGNAT
+        "192.0.2.10",  # TEST-NET-1 documentation range
+        "198.18.0.1",  # benchmarking range
+        "::ffff:127.0.0.1",  # IPv4-mapped loopback
+        "::ffff:10.0.0.5",  # IPv4-mapped private
+        "fd00::1",  # IPv6 unique local
+        "fe80::1%eth0",  # IPv6 link-local with zone id
     ],
 )
 def test_is_safe_url_rejects_internal_addresses(monkeypatch, ip):
