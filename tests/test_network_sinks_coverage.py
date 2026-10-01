@@ -37,6 +37,16 @@ _LIVE_HOST = {
     "snmp": {"system": {"sysDescr": "Linux router"}, "interfaces": []},
 }
 
+# The least-privilege handle plugin-registry passes in (minderhq/minder#2045).
+_SCOPED_DB = {
+    "host": "postgres",
+    "port": 5432,
+    "user": "minder_plugins",
+    "password": "plugin-pw",
+    "database": "minder",
+    "schema": "plugin_data",
+}
+
 
 _RealAsyncClient = httpx.AsyncClient
 
@@ -156,7 +166,7 @@ async def test_sink_postgres_success_reports_upserted_marked_down_and_purged(
         }
     )
     monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=conn))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"database": _SCOPED_DB})
 
     result = await pl._sink_postgres(
         [_LIVE_HOST], {"new": ["10.0.0.5"], "down": [], "changed": []}
@@ -177,13 +187,52 @@ async def test_sink_postgres_closes_connection_even_when_execute_fails(monkeypat
 
     conn = _FakePgConnection(execute_error=RuntimeError("disk full, password=hunter2"))
     monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=conn))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"database": _SCOPED_DB})
 
     result = await pl._sink_postgres([_LIVE_HOST], {})
 
     assert result == {"status": "error", "error": "RuntimeError"}
     assert "hunter2" not in str(result)
     assert conn.closed is True
+
+
+@pytest.mark.asyncio
+async def test_sink_postgres_connects_with_the_scoped_handle_not_the_env(
+    monkeypatch,
+):
+    """minderhq/minder#2045: the sink uses the registry-passed least-privilege
+    handle (and its schema), never the owner POSTGRES_* credentials in the env."""
+    import asyncpg
+
+    monkeypatch.setenv("POSTGRES_USER", "minder")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "owner-secret")
+    connect = AsyncMock(return_value=_FakePgConnection())
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    pl = NetworkPlugin({"database": _SCOPED_DB})
+
+    await pl._sink_postgres([_LIVE_HOST], {})
+
+    kwargs = connect.await_args.kwargs
+    assert kwargs["user"] == "minder_plugins"
+    assert kwargs["password"] == "plugin-pw"
+    assert kwargs["server_settings"] == {"search_path": "plugin_data"}
+    assert "owner-secret" not in str(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_sink_postgres_without_a_database_handle_skips(monkeypatch):
+    """No handle from the registry -> no connection at all (fail closed), even
+    with owner credentials present in the process env."""
+    import asyncpg
+
+    monkeypatch.setenv("POSTGRES_PASSWORD", "owner-secret")
+    connect = AsyncMock()
+    monkeypatch.setattr(asyncpg, "connect", connect)
+
+    result = await NetworkPlugin({})._sink_postgres([_LIVE_HOST], {})
+
+    assert result == {"status": "no-database"}
+    connect.assert_not_awaited()
 
 
 # ── _sink_neo4j ────────────────────────────────────────────────────────────────
