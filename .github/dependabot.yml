@@ -17,3 +17,10 @@ updates:
     groups:
       pip:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
+    # Majors (React, TypeScript, Vite, ...) are deliberate migrations, not
+    # routine bumps: one grouped PR mixing them cannot resolve (seen on the
+    # first run), so they are skipped here and planned as their own work.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
