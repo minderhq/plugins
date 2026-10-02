@@ -8,7 +8,7 @@ match their long-standing use as network-plugin internals.
 
 import ipaddress
 from typing import Dict, List
-from xml.etree import ElementTree
+import defusedxml.ElementTree as ElementTree
 
 # ── SNMP OID constants ────────────────────────────────────────────────────────
 _SNMP_SYSTEM_OIDS = {

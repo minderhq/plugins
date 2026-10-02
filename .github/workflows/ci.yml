@@ -73,6 +73,46 @@ jobs:
       - name: Test the whole catalog
         run: pytest -q
 
+  security:
+    name: Security Gates
+    # Catalog plugins run IN-PROCESS inside minder's plugin-registry, so a
+    # community PR adding subprocess/eval/stdlib XML is a core compromise
+    # (minderhq/minder#2071, G15). All three gates below are blocking.
+    # GitHub-hosted only: public repo, fork PRs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Plugin AST policy
+        # stdlib-only; bans subprocess / os.system+exec+spawn / eval+exec+
+        # compile+__import__ / stdlib xml / pickle+marshal loads. Escape hatch
+        # and rule list: scripts/check_plugin_policy.py.
+        run: python scripts/check_plugin_policy.py
+
+      - name: Install scanners
+        # Pinned so a scanner release can't silently change what fails.
+        run: uv pip install bandit==1.9.4 pip-audit==2.10.1
+
+      - name: Bandit (fail on HIGH severity)
+        run: bandit -r . -x ./tests --severity-level high -q
+
+      - name: pip-audit (fail on known CVEs)
+        # Resolve pyproject's dev extra (everything CI/plugins pull in) to a
+        # fully pinned set, then audit exactly that set. The git-pinned
+        # minder-plugin-sdk has no PyPI version and is reported as skipped.
+        run: |
+          uv pip compile pyproject.toml --extra dev -q -o "$RUNNER_TEMP/requirements.txt"
+          pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off
+
   secrets-scan:
     name: Secrets Scan
     # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request

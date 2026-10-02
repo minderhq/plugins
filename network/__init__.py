@@ -265,6 +265,8 @@ class NetworkPlugin:
     # ── subprocess helper ────────────────────────────────────────────────────
     async def _run(self, *cmd: str, timeout: float = 60.0) -> "tuple[int, str]":
         try:
+            # plugin-policy: allow subprocess -- network discovery shells out to the
+            # nmap/snmp CLIs by design; argv list (never a shell), fixed binaries.
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
             )
