@@ -44,7 +44,7 @@ jobs:
     # GitHub-hosted only: public repo, fork PRs.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -83,7 +83,7 @@ jobs:
     # split as `validate` above.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -91,7 +91,7 @@ jobs:
         # Pinned to a specific SHA, not a mutable branch/tag -- see minderhq/minder's
         # quality.yml Secrets Scan job for the incident (CVE-2026-33634) that
         # motivated this.
-        uses: trufflesecurity/trufflehog@bcfcf73aaf4759d4dadc2783177c245a02792318 # v3.97.0
+        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85 # v3.97.9
         with:
           path: ./
           # github.event.before only exists on `push` payloads, not `pull_request`
