@@ -630,7 +630,7 @@ class NetworkPlugin:
             import asyncpg
         except ImportError:
             return {"status": "unavailable"}
-        # minderhq/minder#2045: connect with the database handle the registry
+        # Connect with the database handle the registry
         # passes in (a least-privilege role confined to the plugin schema), never
         # the platform owner credentials from the process env. No handle -> skip.
         db = self.config.get("database") or {}

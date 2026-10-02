@@ -1,4 +1,4 @@
-"""Tests for scripts/check_plugin_policy.py (minderhq/minder#2071)."""
+"""Tests for scripts/check_plugin_policy.py."""
 
 import importlib.util
 import sys

@@ -1,6 +1,6 @@
 name: CodeQL
 
-# Static analysis of the catalog's Python (minderhq/minder#2071, G15): plugins
+# Static analysis of the catalog's Python: plugins
 # run in-process inside minder core. GitHub-hosted (free for public repos).
 on:
   push:

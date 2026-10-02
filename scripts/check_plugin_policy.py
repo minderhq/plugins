@@ -1,4 +1,4 @@
-"""AST security policy for catalog plugins (minderhq/minder#2071, G15).
+"""AST security policy for catalog plugins.
 
 Catalog plugins run **in-process** inside minder's plugin-registry, so a plugin
 that shells out, evaluates strings, parses XML with the stdlib or unpickles data

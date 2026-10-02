@@ -1,0 +1,22 @@
+name: Public hygiene
+
+# Fails on references to private Minder resources (private-repo links, internal
+# hostnames, tailnet IPs). Shared definition + policy: minderhq/.github.
+# Deliberately no paths-ignore: Markdown is where links live.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: minderhq/.github/.github/workflows/public-hygiene.yml@main
