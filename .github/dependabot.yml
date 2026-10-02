@@ -1,4 +1,4 @@
-# Dependabot: grouped weekly bumps (minderhq/minder#2072, G17).
+# Dependabot: grouped weekly bumps.
 version: 2
 updates:
   - package-ecosystem: github-actions

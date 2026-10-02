@@ -37,7 +37,7 @@ _LIVE_HOST = {
     "snmp": {"system": {"sysDescr": "Linux router"}, "interfaces": []},
 }
 
-# The least-privilege handle plugin-registry passes in (minderhq/minder#2045).
+# The least-privilege handle plugin-registry passes in.
 _SCOPED_DB = {
     "host": "postgres",
     "port": 5432,
@@ -200,7 +200,7 @@ async def test_sink_postgres_closes_connection_even_when_execute_fails(monkeypat
 async def test_sink_postgres_connects_with_the_scoped_handle_not_the_env(
     monkeypatch,
 ):
-    """minderhq/minder#2045: the sink uses the registry-passed least-privilege
+    """The sink uses the registry-passed least-privilege
     handle (and its schema), never the owner POSTGRES_* credentials in the env."""
     import asyncpg
 

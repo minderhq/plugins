@@ -1,6 +1,6 @@
 # Minder plugins
 
-The **catalog** of [Minder](https://github.com/minderhq/minder) plugins —
+The **catalog** of [Minder](https://minderhq.github.io/www/) plugins —
 first-party and community — each validated against the
 [plugin-sdk](https://github.com/minderhq/plugin-sdk).
 
@@ -21,7 +21,7 @@ handlers (or a declarative manifest), never uploaded code.
 
 > **Status:** wired. This catalog is vendored into `minderhq/minder` as a git
 > submodule (`src/plugins_catalog/`); its Dockerfile merges every plugin here
-> into the running plugin-registry at build time (minderhq/minder#1460/#1472).
+> into the running plugin-registry at build time.
 > `network`/`telegraf` (Minder's own first-party infra plugins) moved here
 > too, so this repo is now the single source for every plugin — first-party
 > and community alike, no plugin duplicated between the two repos.

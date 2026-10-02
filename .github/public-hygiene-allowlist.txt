@@ -1,0 +1,6 @@
+# Public-hygiene allowlist -- see minderhq/.github's public-hygiene.yml.
+# One entry per line: <python regex searched against "path:line">  # <reason>
+# Only harmless hits belong here; private links/refs get rewritten instead.
+
+^tests/test_webcrawl\.py:\s*"100\.(64\.0\.1|101\.102\.103)",\s*# CGNAT # SSRF-guard test fixtures: example CGNAT addresses that must be rejected, not real hosts
+^webcrawl/__init__\.py:.*100\.64\.0\.0/10 shared address space # docstring naming the CGNAT range the SSRF guard rejects

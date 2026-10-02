@@ -8,7 +8,7 @@ Run it:
     python scripts/gen_catalog.py --check     # exit 1 if catalog.json is stale
 
 The manifest is the decision-independent contract point for the marketplace's
-catalog ingestion (minderhq/minder#1294 phase 2): whatever the eventual
+catalog ingestion: whatever the eventual
 vendoring mechanism, a consumer reads one JSON to discover names, versions,
 capabilities, config schema, AI tools and display metadata — no need to import
 plugin code. Regenerate it whenever you add or change a plugin (CONTRIBUTING).

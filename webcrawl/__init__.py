@@ -1,7 +1,7 @@
 """Web-crawl connector plugin (first-party module plugin).
 
 The first **connector** in the catalog — the fetch-from-source half of
-minderhq/minder#1499's "connector-based ingestion" direction, proven with the one
+Minder's "connector-based ingestion" direction, proven with the one
 source that needs **no OAuth / no credential decision**: the public web.
 
 Given a configured list of seed URLs (and an optional shallow, same-domain crawl
