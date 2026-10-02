@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Static analysis of the catalog's Python (minderhq/minder#2071, G15): plugins
+# run in-process inside minder core. GitHub-hosted (free for public repos).
+on:
+  push:
+    branches: [main]
+    paths-ignore: [ '**/*.md' ]
+  pull_request:
+    branches: [main]
+    paths-ignore: [ '**/*.md' ]
+  schedule:
+    - cron: '27 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        # SHA-pinned (org convention since CVE-2026-33634).
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: python
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:python
+          output: ${{ runner.temp }}/codeql-sarif
+
+      - name: Fail on error-level findings
+        # analyze only uploads alerts; make the job itself blocking so a
+        # finding fails the PR even without a code-scanning merge rule.
+        run: |
+          n=$(jq '[.runs[].results[]? | select(.level == "error")] | length' "$RUNNER_TEMP"/codeql-sarif/*.sarif | paste -sd+ | bc)
+          echo "CodeQL error-level results: $n"
+          if [ "$n" -gt 0 ]; then
+            jq -r '.runs[].results[]? | select(.level == "error") | "\(.ruleId): \(.locations[0].physicalLocation.artifactLocation.uri):\(.locations[0].physicalLocation.region.startLine) \(.message.text)"' "$RUNNER_TEMP"/codeql-sarif/*.sarif
+            exit 1
+          fi
