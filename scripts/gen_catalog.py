@@ -31,6 +31,27 @@ from minder_plugin_sdk import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Execution tiers, cheapest first, and the cheapest tier each runtime can run
+# in: T0 declarative engine, T2 a worker in a shared runner group, T3 a
+# container, T4 the author's own infrastructure. A code plugin in this
+# catalog is a Python package, so its runtime is "python".
+TIERS = ("T0", "T1", "T2", "T3", "T4")
+RUNTIME_MIN_TIER = {
+    "declarative": "T0",
+    "python": "T2",
+    "image": "T3",
+    "remote": "T4",
+}
+
+
+def compute_tier(runtime: str, floor: Any = None) -> str:
+    """tier = max(need(runtime), floor). ``floor`` is the trust floor or an
+    operator override; none applies yet."""
+    need = RUNTIME_MIN_TIER[runtime]
+    return need if floor is None else max(need, floor, key=TIERS.index)
+
+
 CATALOG_FILE = ROOT / "catalog.json"
 _SKIP = {"tests", "scripts", "__pycache__"}
 
@@ -70,6 +91,8 @@ def _entry(pkg: str) -> Dict[str, Any]:
         "ui_schema": ui,
         "ai_tools": build_tool_definitions(plugin),
         "display": getattr(type(plugin), "DISPLAY", {}),
+        "runtime": "python",
+        "tier": compute_tier("python"),
     }
 
 

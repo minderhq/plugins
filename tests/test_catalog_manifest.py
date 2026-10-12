@@ -25,6 +25,8 @@ _REQUIRED = (
     "ui_schema",
     "ai_tools",
     "display",
+    "runtime",
+    "tier",
 )
 
 
@@ -44,6 +46,7 @@ def test_every_entry_has_the_required_fields():
         assert e["name"] and e["version"], f"incomplete metadata: {e!r}"
         assert isinstance(e["capabilities"], list)
         assert isinstance(e["ai_tools"], list)
+        assert (e["runtime"], e["tier"]) == ("python", "T2")
 
 
 def test_entries_are_sorted_by_name():
