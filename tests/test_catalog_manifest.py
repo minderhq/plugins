@@ -25,6 +25,8 @@ _REQUIRED = (
     "ui_schema",
     "ai_tools",
     "display",
+    "runtime",
+    "tier",
 )
 
 
@@ -44,6 +46,9 @@ def test_every_entry_has_the_required_fields():
         assert e["name"] and e["version"], f"incomplete metadata: {e!r}"
         assert isinstance(e["capabilities"], list)
         assert isinstance(e["ai_tools"], list)
+        assert e["runtime"] in gen_catalog.RUNTIME_MIN_TIER
+        assert e["tier"] in gen_catalog.TIERS
+        assert (e["runtime"], e["tier"]) == ("python", "T2")
 
 
 def test_entries_are_sorted_by_name():
@@ -57,3 +62,25 @@ def test_committed_catalog_json_is_fresh():
     assert (
         gen_catalog.main(["--check"]) == 0
     ), "catalog.json is stale — run gen_catalog.py"
+
+
+def test_compute_tier_need_per_runtime():
+    assert gen_catalog.compute_tier("declarative") == "T0"
+    assert gen_catalog.compute_tier("python") == "T2"
+    assert gen_catalog.compute_tier("image") == "T3"
+    assert gen_catalog.compute_tier("remote") == "T4"
+
+
+def test_compute_tier_floor_raises_but_never_lowers():
+    assert gen_catalog.compute_tier("declarative", "T3") == "T3"
+    assert gen_catalog.compute_tier("image", "T0") == "T3"
+    assert gen_catalog.compute_tier("python", "T2") == "T2"
+
+
+def test_compute_tier_rejects_unknown_inputs():
+    import pytest
+
+    with pytest.raises(KeyError):
+        gen_catalog.compute_tier("wasm-ish")
+    with pytest.raises(ValueError):
+        gen_catalog.compute_tier("python", "T9")
