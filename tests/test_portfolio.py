@@ -444,3 +444,75 @@ def test_analyze_returns_last_collection(monkeypatch):
     monkeypatch.setattr(p, "_fetch_latest_close", AsyncMock(return_value=None))
     asyncio.run(p.collect_data())
     assert asyncio.run(p.analyze()) == p._last
+
+
+# ── bounds and refusals ──────────────────────────────────────────────────────
+def test_apply_config_caps_and_dedupes_symbols(caplog):
+    p = PortfolioPlugin()
+    many = ",".join(f"S{i}" for i in range(portfolio.MAX_SYMBOLS + 7))
+    with caplog.at_level("WARNING"):
+        p.apply_config({"PORTFOLIO_HOLDINGS": "AAPL,aapl," + many})
+    assert len(p.symbols) == portfolio.MAX_SYMBOLS
+    assert p.symbols[0] == "AAPL" and p.symbols.count("AAPL") == 1
+    assert "at most" in caplog.text
+
+
+def test_get_value_reads_at_most_max_symbols_concurrently_bounded(
+    bind_timeseries, monkeypatch
+):
+    p, ts = _writing(bind_timeseries)
+    symbols = [f"S{i}" for i in range(portfolio.MAX_SYMBOLS + 10)]
+    ts.points[("alice", "portfolio_index", "kind", "holdings")] = (
+        1,
+        {"symbols": ",".join(symbols)},
+    )
+    for sym in symbols:
+        ts.points[("alice", "portfolio_holding", "symbol", sym)] = (1, {"price": 1.0})
+    inflight = {"now": 0, "max": 0}
+    real_latest = ts.latest
+
+    async def tracking(*args, **kwargs):
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await asyncio.sleep(0)
+        try:
+            return await real_latest(*args, **kwargs)
+        finally:
+            inflight["now"] -= 1
+
+    monkeypatch.setattr(ts, "latest", tracking)
+    res = _read(p, ts, "alice")
+    assert res["symbol_count"] == portfolio.MAX_SYMBOLS
+    assert 1 < inflight["max"] <= portfolio._READ_CONCURRENCY
+
+
+def test_write_index_caps_the_symbol_list(bind_timeseries):
+    p, ts = _writing(bind_timeseries)
+    p.symbols = [f"S{i}" for i in range(portfolio.MAX_SYMBOLS + 5)]
+    assert asyncio.run(p._write_index()) is True
+    (line,) = ts.lines
+    assert line.count(",") - 1 == portfolio.MAX_SYMBOLS - 1  # 1 comma for the tag
+
+
+class TimeseriesDenied(Exception):
+    """Stands in for the platform's refusal (matched by type name)."""
+
+    reason = "portfolio may not read measurement 'x'"
+
+
+class CapabilityInvalid(Exception):
+    reason = "fields must be plain field names"
+
+
+@pytest.mark.parametrize(
+    "exc, marker",
+    [(TimeseriesDenied(), "read refused"), (CapabilityInvalid(), "read rejected")],
+)
+def test_get_value_logs_a_refusal_as_an_error(bind_timeseries, caplog, exc, marker):
+    p, ts = _writing(bind_timeseries, fail_latest=exc)
+    with caplog.at_level("WARNING"):
+        res = _read(p, ts, "alice")
+    assert res["error"] == marker and res["holdings"] == {}
+    (record,) = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert type(exc).__name__ in record.getMessage()
+    assert exc.reason in record.getMessage()

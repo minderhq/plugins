@@ -42,7 +42,9 @@ user tracks, read from the store through the handle's
 newest ``portfolio_index`` point (which symbols), then each symbol's newest
 ``portfolio_holding`` point (its price). The platform scopes both reads to the
 owner it runs the action for, so the answer survives a restart and never mixes
-owners. It is a
+owners. ``as_of`` is the store's timestamp (``2021-01-02T00:00:00``: UTC, no
+offset suffix). An owner's ``get_value`` is empty until their first collection
+writes the index. At most ``MAX_SYMBOLS`` symbols are tracked per owner. It is a
 PRIVATE_PER_USER action, so plugin-registry's action dispatch
 (``routes/plugins.py``) injects the AUTHENTICATED caller's own ``owner_id`` from
 the JWT — never caller-supplied — so a user can only ever read their own
@@ -52,6 +54,7 @@ plugin config-only. The scheduled per-owner collection (above) remains the write
 path; ``get_value`` is the read path over the same private series.
 """
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -72,6 +75,16 @@ _MEASUREMENT = "portfolio_holding"
 # config).
 _INDEX_MEASUREMENT = "portfolio_index"
 _INDEX_TAG = ("kind", "holdings")
+# At most this many symbols per owner: bounds a collection's writes and
+# get_value's reads (one store read per symbol).
+MAX_SYMBOLS = 50
+# get_value's per-symbol reads in flight at once.
+_READ_CONCURRENCY = 8
+# Error type names the platform's time-series handle raises for a refused or
+# rejected call (in process and through a runner); anything else is treated
+# as the store being unavailable.
+_REFUSED_ERRORS = frozenset({"TimeseriesDenied", "CapabilityDenied"})
+_REJECTED_ERRORS = frozenset({"TimeseriesInvalid", "CapabilityInvalid"})
 
 # Same charset guard as crypto/tefas: holdings symbols come from per-user
 # config (API-settable) and are used as a line-protocol tag -- \Z (not $) so a
@@ -154,11 +167,19 @@ class PortfolioPlugin:
         is not a CONFIG_SCHEMA field -- it's injected only by monitoring.py's
         ``_collect_private_plugin_data``, never settable via the config API."""
         if "PORTFOLIO_HOLDINGS" in cfg:
-            self.symbols = [
-                s.strip().upper()
-                for s in str(cfg["PORTFOLIO_HOLDINGS"] or "").split(",")
-                if s.strip()
-            ]
+            symbols = list(
+                dict.fromkeys(
+                    s.strip().upper()
+                    for s in str(cfg["PORTFOLIO_HOLDINGS"] or "").split(",")
+                    if s.strip()
+                )
+            )
+            if len(symbols) > MAX_SYMBOLS:
+                logger.warning(
+                    f"⚠️ portfolio tracks at most {MAX_SYMBOLS} symbols; "
+                    f"ignoring {len(symbols) - MAX_SYMBOLS} more"
+                )
+            self.symbols = symbols[:MAX_SYMBOLS]
         if "PORTFOLIO_SINK_INFLUXDB" in cfg:
             v = cfg["PORTFOLIO_SINK_INFLUXDB"]
             self.sink_influxdb = (
@@ -276,7 +297,7 @@ class PortfolioPlugin:
         sink = self._timeseries if self.sink_influxdb else None
         if sink is None or not self._owner_id:
             return False
-        symbols = [s for s in self.symbols if _SAFE_SYMBOL.match(s)]
+        symbols = [s for s in self.symbols if _SAFE_SYMBOL.match(s)][:MAX_SYMBOLS]
         line = line_protocol(
             _INDEX_MEASUREMENT,
             {_INDEX_TAG[0]: _INDEX_TAG[1]},
@@ -349,7 +370,15 @@ class PortfolioPlugin:
         try:
             holdings = await self._read_holdings(handle)
         except Exception as e:
-            logger.warning(f"⚠️ portfolio read failed: {type(e).__name__}")
+            kind = type(e).__name__
+            if kind in _REFUSED_ERRORS or kind in _REJECTED_ERRORS:
+                # Not a hiccup: the platform refused or rejected the read (a
+                # scope or owner problem). Its reason names no values.
+                reason = getattr(e, "reason", None) or str(e)
+                logger.error(f"❌ portfolio read {kind}: {str(reason)[:200]}")
+                marker = "read refused" if kind in _REFUSED_ERRORS else "read rejected"
+                return {**base, "error": marker}
+            logger.warning(f"⚠️ portfolio read failed: {kind}")
             return {**base, "error": "read failed"}
         result: Dict = {
             "owner_id": owner,
@@ -370,11 +399,18 @@ class PortfolioPlugin:
             for s in str(raw or "").split(",")
             if s.strip() and _SAFE_SYMBOL.match(s.strip())
         ]
+        wanted = list(dict.fromkeys(symbols))[:MAX_SYMBOLS]
+        gate = asyncio.Semaphore(_READ_CONCURRENCY)
+
+        async def _one(symbol: str) -> Any:
+            async with gate:
+                return await handle.latest(
+                    _MEASUREMENT, "symbol", symbol, fields=["price"]
+                )
+
+        points = await asyncio.gather(*(_one(sym) for sym in wanted))
         holdings: Dict[str, Dict] = {}
-        for symbol in dict.fromkeys(symbols):
-            point = await handle.latest(
-                _MEASUREMENT, "symbol", symbol, fields=["price"]
-            )
+        for symbol, point in zip(wanted, points):
             price = (point or {}).get("fields", {}).get("price") if point else None
             if price is None:
                 continue
