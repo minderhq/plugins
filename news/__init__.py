@@ -31,7 +31,7 @@ import logging
 import os
 import defusedxml.ElementTree as ET
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -122,6 +122,11 @@ class NewsPlugin:
     # Where this plugin connects (contract-v2 EGRESS declaration): the
     # configured RSS feeds (NEWS_FEEDS), anywhere on the public web.
     EGRESS = "public"
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["news"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     ACTIONS = frozenset({"refresh", "get_news"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
@@ -292,32 +297,30 @@ class NewsPlugin:
                 )
         return [i for i in items if i["title"]][: self.max_items]
 
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle
+        (``write(lines, precision)``, scoped to ``TIMESERIES``). The plugin holds
+        no InfluxDB address or token; with no handle bound the sink is skipped."""
+        self._timeseries = handle
+
     async def _write_influxdb(self, counts: Dict[str, int]) -> bool:
         """Write per-feed item counts to InfluxDB (measurement 'news')."""
-        cfg = self.config.get("influxdb") or {}
-        if not (self.sink_influxdb and cfg.get("enabled") and counts):
+        sink = self._timeseries if self.sink_influxdb else None
+        if not (sink is not None and counts):
             return False
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
-        token = cfg.get("token", "")
         # line_protocol escapes the feed tag; item_count is an int → 'Ni'.
-        lines = "\n".join(
-            line_protocol("news", {"feed": feed}, {"item_count": n})
+        lines = [
+            ln
             for feed, n in counts.items()
-        )
-        url = f"http://{host}:{port}/api/v2/write"
+            if (ln := line_protocol("news", {"feed": feed}, {"item_count": n}))
+        ]
+        if not lines:
+            return False
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    url,
-                    params={"org": org, "bucket": bucket, "precision": "s"},
-                    headers={"Authorization": f"Token {token}"},
-                    content=lines,
-                )
-                resp.raise_for_status()
+            await sink.write(lines, "s")
             return True
         except Exception as e:
-            logger.warning(f"⚠️ InfluxDB write failed: {type(e).__name__}")
+            logger.warning(f"⚠️ time-series write failed: {type(e).__name__}")
             return False
 
     # ── registry-driven reads ────────────────────────────────────────────────

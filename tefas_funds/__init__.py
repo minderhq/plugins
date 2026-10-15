@@ -4,8 +4,12 @@ Backfills daily fund prices from TEFAS (Türkiye Elektronik Fon Alım Satım Pla
 for the configured fund codes — from a configured start date (or a sane default) up to
 today — into InfluxDB (measurement ``tefas_fund_price``, tag ``code``, field ``price``,
 one point per publication day). Idempotent + incremental like the crypto plugin: each
-run resumes from the latest timestamp already in InfluxDB. Financial data → no gaps /
+run resumes from the latest timestamp already stored. Financial data → no gaps /
 no double-counting.
+
+Points are written through the time-series handle the platform binds at load
+(``bind_timeseries``), scoped to this plugin's ``TIMESERIES`` measurements. The
+plugin holds no InfluxDB address or token; with no handle bound the sink is skipped.
 
 Source: the ``tefas-crawler`` library (in the registry image). It's synchronous and
 TEFAS rate-limits/robot-checks automated access, so fetches run in a worker thread and
@@ -29,10 +33,9 @@ import math
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from minder_plugin_sdk import influx as influx_helpers
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import PluginMetadata, line_protocol
 
 __all__ = ["TefasPlugin"]
 
@@ -40,9 +43,13 @@ logger = logging.getLogger("minder.plugin.tefas")
 
 _MEASUREMENT = "tefas_fund_price"
 _DEFAULT_START = "2015-01-01"
+# The platform caps one timeseries.write batch (5,000 lines); a long backfill is
+# written in ascending chunks below that, so a failed chunk leaves a clean
+# resume point.
+_WRITE_CHUNK = 2000
 
-# Fund codes come from config (TEFAS_FUNDS, API-settable) and are interpolated into
-# an InfluxDB SQL query + line protocol — restrict to a safe charset so a config
+# Fund codes come from config (TEFAS_FUNDS, API-settable) and are used as a tag in
+# line protocol and a resume lookup — restrict to a safe charset so a config
 # value can't break out into injection (or corrupt line protocol with a space/comma).
 # \Z (not $) -- $ matches just before a trailing newline too, so "CODE\n" would pass
 # this guard and then corrupt the line-protocol payload with an embedded newline.
@@ -66,6 +73,11 @@ class TefasPlugin:
 
     # Where this plugin connects (contract-v2 EGRESS declaration): via the tefas-crawler library.
     EGRESS = ["www.tefas.gov.tr"]
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["tefas_fund_price"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     ACTIONS = frozenset({"refresh", "get_fund_price"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
@@ -218,32 +230,56 @@ class TefasPlugin:
             return []
         return await asyncio.to_thread(self._fetch_sync, code, start, end)
 
-    # ── InfluxDB (mirror crypto: write history + query resume point) ───────────
-    def _influx_cfg(self) -> Optional[Dict]:
-        cfg = self.config.get("influxdb") or {}
-        return cfg if (self.sink_influxdb and cfg.get("enabled")) else None
+    # ── time series (mirror crypto: write history + query resume point) ────────
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle:
+        ``write(lines, precision)`` and ``latest(measurement, tag_key,
+        tag_value)``, scoped to ``TIMESERIES``."""
+        self._timeseries = handle
+
+    def _sink(self) -> Any:
+        return self._timeseries if self.sink_influxdb else None
 
     async def _latest_influx_date(self, code: str) -> Optional[date]:
-        return await influx_helpers.latest_influx_date(
-            http_timeout=self.http_timeout,
-            cfg=self._influx_cfg(),
-            safe_pattern=_SAFE_CODE,
-            measurement=_MEASUREMENT,
-            tag_key="code",
-            tag_value=code,
-        )
+        """Latest day already stored for code, or None (empty, sink off, or the
+        store unavailable: the caller then backfills from the start date)."""
+        sink = self._sink()
+        if sink is None or not _SAFE_CODE.match(code):
+            return None
+        try:
+            t = await sink.latest(_MEASUREMENT, "code", code)
+        except Exception as e:
+            logger.warning(f"⚠️ resume query failed for {code}: {type(e).__name__}")
+            return None
+        if not t:
+            return None
+        try:
+            return datetime.fromisoformat(str(t).replace("Z", "")).date()
+        except ValueError:
+            return None
 
     async def _write_history(self, code: str, points: List[Tuple[int, float]]) -> int:
-        return await influx_helpers.write_history(
-            http_timeout=self.http_timeout,
-            cfg=self._influx_cfg(),
-            safe_pattern=_SAFE_CODE,
-            measurement=_MEASUREMENT,
-            tag_key="code",
-            tag_value=code,
-            field_name="price",
-            points=points,
-        )
+        """Write [(ts, price)]; return the count written (0 if sink off/empty)."""
+        sink = self._sink()
+        if sink is None or not points:
+            return 0
+        if not _SAFE_CODE.match(code):
+            logger.warning(f"⚠️ Skipping write for unsafe code: {code!r}")
+            return 0
+        # line_protocol escapes the tag and drops a non-finite price.
+        lines = [
+            ln
+            for ts, price in points
+            if (ln := line_protocol(_MEASUREMENT, {"code": code}, {"price": price}, ts))
+        ]
+        written = 0
+        for i in range(0, len(lines), _WRITE_CHUNK):
+            try:
+                written += int(await sink.write(lines[i : i + _WRITE_CHUNK], "s"))
+            except Exception as e:
+                logger.warning(f"⚠️ write failed for {code}: {type(e).__name__}")
+                break
+        return written
 
     # ── registry-driven reads ────────────────────────────────────────────────
     async def collect_data(self) -> Dict:

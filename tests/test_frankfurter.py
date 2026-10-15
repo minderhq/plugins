@@ -135,21 +135,30 @@ def test_convert_bad_amount(monkeypatch):
     }
 
 
-def test_write_influxdb_emits_a_point_per_rate(monkeypatch):
+def test_write_influxdb_emits_a_point_per_rate(bind_timeseries):
     p = FrankfurterPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    cap = {}
-    monkeypatch.setattr(frankfurter.httpx, "AsyncClient", _client({}, capture=cap))
-    ok = asyncio.run(p._write_influxdb("EUR", {"USD": 1.1, "TRY": 34.0}))
+    ts = bind_timeseries(p)
+    assert p.TIMESERIES == {"measurements": ["fx_rate"]}
+    ok = asyncio.run(p._write_influxdb("EUR", {"USD": 1.1, "TRY": 34.0, "X": None}))
     assert ok is True
-    body = cap["content"]
-    assert "fx_rate,base=EUR,quote=USD rate=1.1" in body
-    assert "fx_rate,base=EUR,quote=TRY rate=34.0" in body
+    assert ts.lines == [
+        "fx_rate,base=EUR,quote=USD rate=1.1",
+        "fx_rate,base=EUR,quote=TRY rate=34.0",
+    ]
 
 
-def test_write_influxdb_gated_off_when_sink_disabled(monkeypatch):
+def test_write_influxdb_gated_off_when_sink_disabled(bind_timeseries):
     p = FrankfurterPlugin()
+    ts = bind_timeseries(p)
     p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb("EUR", {"USD": 1.1})) is False
+    assert ts.batches == []
+
+
+def test_write_influxdb_without_handle_or_on_failure(bind_timeseries):
+    p = FrankfurterPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    p.sink_influxdb = True
+    assert asyncio.run(p._write_influxdb("EUR", {"USD": 1.1})) is False
+    bind_timeseries(p, fail_write=RuntimeError("down"))
     assert asyncio.run(p._write_influxdb("EUR", {"USD": 1.1})) is False

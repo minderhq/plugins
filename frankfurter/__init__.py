@@ -9,7 +9,7 @@ an action + AI tool, a DISPLAY, and declared REQUIRES.
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -25,6 +25,11 @@ _API = "https://api.frankfurter.app"
 class FrankfurterPlugin(PluginBase):
     # Where this plugin connects (contract-v2 EGRESS declaration).
     EGRESS = ["api.frankfurter.app"]
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["fx_rate"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     DISPLAY = {
         "label": "Exchange Rates",
@@ -133,15 +138,18 @@ class FrankfurterPlugin(PluginBase):
         rates = body.get("rates")
         return rates if isinstance(rates, dict) else None
 
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle
+        (``write(lines, precision)``, scoped to ``TIMESERIES``). The plugin holds
+        no InfluxDB address or token; with no handle bound the sink is skipped."""
+        self._timeseries = handle
+
     async def _write_influxdb(self, base: str, rates: Dict) -> bool:
         """Write each rate as a point (measurement 'fx_rate', tags base+quote,
         float field 'rate'). The advertised sink used to be a no-op."""
-        cfg = self.config.get("influxdb") or {}
-        if not (self.sink_influxdb and cfg.get("enabled") and rates):
+        sink = self._timeseries if self.sink_influxdb else None
+        if not (sink is not None and rates):
             return False
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
-        token = cfg.get("token", "")
         lines = [
             ln
             for quote, rate in rates.items()
@@ -156,17 +164,10 @@ class FrankfurterPlugin(PluginBase):
         if not lines:
             return False
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    f"http://{host}:{port}/api/v2/write",
-                    params={"org": org, "bucket": bucket, "precision": "s"},
-                    headers={"Authorization": f"Token {token}"},
-                    content="\n".join(lines),
-                )
-                resp.raise_for_status()
+            await sink.write(lines, "s")
             return True
         except Exception as e:
-            logger.warning(f"InfluxDB write failed: {type(e).__name__}")
+            logger.warning(f"⚠️ time-series write failed: {type(e).__name__}")
             return False
 
     async def collect_data(self) -> Dict:

@@ -23,7 +23,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -42,6 +42,11 @@ _SAFE_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 class GitHubPlugin(PluginBase):
     # Where this plugin connects (contract-v2 EGRESS declaration).
     EGRESS = ["api.github.com"]
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["github_repo"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     DISPLAY = {
         "label": "GitHub Repos",
@@ -172,14 +177,17 @@ class GitHubPlugin(PluginBase):
             "open_issues": body.get("open_issues_count"),
         }
 
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle
+        (``write(lines, precision)``, scoped to ``TIMESERIES``). The plugin holds
+        no InfluxDB address or token; with no handle bound the sink is skipped."""
+        self._timeseries = handle
+
     async def _write_influxdb(self, stats: Dict[str, Dict]) -> bool:
         """Write per-repo stats to InfluxDB (measurement 'github_repo')."""
-        cfg = self.config.get("influxdb") or {}
-        if not (self.sink_influxdb and cfg.get("enabled") and stats):
+        sink = self._timeseries if self.sink_influxdb else None
+        if not (sink is not None and stats):
             return False
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
-        token = cfg.get("token", "")
         # line_protocol escapes the repo tag + formats/drops fields (a repo with
         # no numeric stats yields "" and is filtered out).
         lines = [
@@ -197,19 +205,11 @@ class GitHubPlugin(PluginBase):
         lines = [ln for ln in lines if ln]
         if not lines:
             return False
-        url = f"http://{host}:{port}/api/v2/write"
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    url,
-                    params={"org": org, "bucket": bucket, "precision": "s"},
-                    headers={"Authorization": f"Token {token}"},
-                    content="\n".join(lines),
-                )
-                resp.raise_for_status()
+            await sink.write(lines, "s")
             return True
         except Exception as e:
-            logger.warning(f"⚠️ InfluxDB write failed: {type(e).__name__}")
+            logger.warning(f"⚠️ time-series write failed: {type(e).__name__}")
             return False
 
     # ── registry-driven reads ────────────────────────────────────────────────

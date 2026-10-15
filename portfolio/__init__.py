@@ -26,9 +26,18 @@ collection run and their own private rows) and into the new per-owner path
 argument (the plugin Protocol's ``collect_data()`` takes none), matching how
 every other plugin already gets runtime config via ``apply_config``.
 
+Points are written through the time-series handle the platform binds at load
+(``bind_timeseries``), scoped to this plugin's ``TIMESERIES`` measurement. The
+plugin holds no InfluxDB address or token, and it does not tag the owner itself:
+the platform forces the ``owner_id`` tag to the owner it is collecting for, so a
+point can never land under another user's (or the shared) owner.
+
 Exposes a single owner-scoped read-back action (#1035): ``get_value`` (AI tool
 ``get_portfolio_value``) returns the latest recorded price for each symbol THIS
-user tracks, read from their own ``owner_id``-tagged InfluxDB series. It is a
+user tracks: the last point this instance wrote for that owner (the platform's
+time-series read returns timestamps, not values, so the plugin keeps that last
+point per owner in memory; it is refilled by the next scheduled collection after
+a restart). It is a
 PRIVATE_PER_USER action, so plugin-registry's action dispatch
 (``routes/plugins.py``) injects the AUTHENTICATED caller's own ``owner_id`` from
 the JWT — never caller-supplied — so a user can only ever read their own
@@ -41,11 +50,11 @@ path; ``get_value`` is the read path over the same private series.
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import PluginMetadata, line_protocol
 
 __all__ = ["PortfolioPlugin"]
 
@@ -55,20 +64,17 @@ _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _MEASUREMENT = "portfolio_holding"
 
 # Same charset guard as crypto/tefas: holdings symbols come from per-user
-# config (API-settable) and are interpolated into an InfluxDB SQL query +
-# line protocol -- \Z (not $) so a trailing "\n" can't sneak through and
-# corrupt the line-protocol payload with an embedded newline.
+# config (API-settable) and are used as a line-protocol tag -- \Z (not $) so a
+# trailing "\n" can't sneak through and corrupt the payload with an embedded
+# newline.
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
 def _owner_tag(owner: str) -> str:
     """Scrub an owner_id (a JWT sub — may be ``auth0|123``, an email, ``a:b``…) to
-    the safe charset used BOTH as the InfluxDB tag and interpolated into the v3
-    SQL query. Replacing EVERY non-safe char (not just space/comma/equals) keeps
-    the write and read paths consistent and neutralises SQL/line-protocol
-    metacharacters — incl. the quote the old ``[ ,=\\n]`` scrub missed. A real sub
-    like ``auth0|123`` becomes ``auth0_123`` on both paths, instead of being
-    happily written and then rejected (raising) on read."""
+    the safe charset the platform uses for the ``owner_id`` tag it forces on
+    every point. Used as the key of the per-owner record ``get_value`` reads, so
+    the write and read paths agree (``auth0|123`` -> ``auth0_123`` on both)."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", owner)
 
 
@@ -88,6 +94,11 @@ class PortfolioPlugin:
     EGRESS = ["query1.finance.yahoo.com"]
 
     PRIVATE_PER_USER = True
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["portfolio_holding"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     # Owner-scoped read-back (#1035). In ACTIONS (not READ_ONLY_ACTIONS) so it is
     # reached via the JWT-gated POST route -- this is PRIVATE data, never the
@@ -135,6 +146,10 @@ class PortfolioPlugin:
         self.symbols: List[str] = []
         self.sink_influxdb = True
         self._owner_id: Optional[str] = None
+        # owner tag -> symbol -> {"price", "as_of"}: the last point written for
+        # each owner (what get_value returns). Keyed by owner, so one owner's
+        # call never sees another's holdings.
+        self._recorded: Dict[str, Dict[str, Dict]] = {}
 
     def apply_config(self, cfg: Dict) -> None:
         """Map centrally-managed per-user config -> runtime state. ``_owner_id``
@@ -215,19 +230,20 @@ class PortfolioPlugin:
                 return (_day_to_unix(day), float(c))
         return None
 
-    # ── InfluxDB (owner-tagged write -- the actual novel part of this plugin) ──
-    def _influx_cfg(self) -> Optional[Dict]:
-        cfg = self.config.get("influxdb") or {}
-        return cfg if (self.sink_influxdb and cfg.get("enabled")) else None
+    # ── time series (owner-scoped write -- the actual novel part of this plugin) ──
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle
+        (``write(lines, precision)``, scoped to ``TIMESERIES``). The platform
+        tags every point with the owner it is collecting for."""
+        self._timeseries = handle
 
     async def _write_holding(self, symbol: str, ts: int, close: float) -> bool:
-        """Write one owner-tagged point. Refuses (logs, returns False) rather
-        than writing under a blank/shared owner_id if none is set -- e.g. a
-        direct collect_data() call outside the per-owner scheduler path,
-        which would otherwise silently mix private data into the shared
-        bucket other plugins write to."""
-        cfg = self._influx_cfg()
-        if not cfg:
+        """Write one point for the current owner. Refuses (logs, returns False)
+        if no owner_id is set -- e.g. a direct collect_data() call outside the
+        per-owner scheduler path; the platform would refuse it too, since a
+        private plugin's write needs an owner."""
+        sink = self._timeseries if self.sink_influxdb else None
+        if sink is None:
             return False
         if not self._owner_id:
             logger.warning(
@@ -236,29 +252,24 @@ class PortfolioPlugin:
             )
             return False
         if not _SAFE_SYMBOL.match(symbol):
-            logger.warning(f"⚠️ Skipping influx write for unsafe symbol: {symbol!r}")
+            logger.warning(f"⚠️ Skipping write for unsafe symbol: {symbol!r}")
             return False
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
-        # owner_id is a JWT `sub` (validated elsewhere as a safe identifier by
-        # the auth layer before it ever reaches plugin config) -- still worth
-        # excluding InfluxDB line-protocol metacharacters defensively, same
-        # spirit as _SAFE_SYMBOL above.
-        owner_tag = _owner_tag(self._owner_id)
-        line = f"{_MEASUREMENT},symbol={symbol},owner_id={owner_tag} price={close} {ts}"
+        line = line_protocol(_MEASUREMENT, {"symbol": symbol}, {"price": close}, ts)
+        if not line:
+            return False
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    f"http://{host}:{port}/api/v2/write",
-                    params={"org": org, "bucket": bucket, "precision": "s"},
-                    headers={"Authorization": f"Token {cfg.get('token', '')}"},
-                    content=line,
-                )
-                resp.raise_for_status()
-            return True
+            await sink.write([line], "s")
         except Exception as e:
-            logger.warning(f"⚠️ InfluxDB write failed for {symbol}: {type(e).__name__}")
+            logger.warning(
+                f"⚠️ time-series write failed for {symbol}: {type(e).__name__}"
+            )
             return False
+        as_of = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        self._recorded.setdefault(_owner_tag(self._owner_id), {})[symbol] = {
+            "price": close,
+            "as_of": as_of,
+        }
+        return True
 
     # ── registry-driven reads ────────────────────────────────────────────────
     async def collect_data(self) -> Dict:
@@ -297,55 +308,24 @@ class PortfolioPlugin:
 
     # ── owner-scoped read-back action (#1035) ────────────────────────────────
     async def get_value(self, owner_id: str) -> Dict:
-        """Latest recorded price for each symbol THIS owner tracks, from their own
-        ``owner_id``-tagged InfluxDB series.
+        """Latest recorded price for each symbol THIS owner tracks: the last
+        point written for them (see the module docstring).
 
         ``owner_id`` is injected by plugin-registry's action dispatch from the
         authenticated caller's JWT (PRIVATE_PER_USER, never caller-supplied), so a
-        user only ever sees their own holdings. Read-only; never raises on a backend
-        hiccup (returns an ``error`` marker + empty holdings instead)."""
+        user only ever sees their own holdings. Read-only."""
         owner = str(owner_id or "").strip()
         if not owner:
             raise ValueError("owner_id is required")
-        # owner_id is a JWT sub interpolated into an InfluxDB SQL query + used as a
-        # tag; _owner_tag scrubs it to the SQL/tag-safe charset (same on write), so
-        # a real sub (auth0|123, an email) reads back exactly as written — no raise.
-        owner_tag = _owner_tag(owner)
-
-        cfg = self.config.get("influxdb") or {}
-        base = {"owner_id": owner, "holdings": {}, "symbol_count": 0}
-        if not cfg.get("enabled"):
-            return {**base, "message": "influxdb not configured"}
-
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        db = cfg.get("bucket", "minder-metrics")
-        # Newest-first; dedupe by symbol in Python (first seen = latest) -- avoids
-        # relying on any particular InfluxDB-3 SQL last()/DISTINCT-ON dialect.
-        q = (
-            f"SELECT symbol, price, time FROM {_MEASUREMENT} "
-            f"WHERE owner_id = '{owner_tag}' ORDER BY time DESC LIMIT 10000"
-        )
-        try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    f"http://{host}:{port}/api/v3/query_sql",
-                    json={"db": db, "q": q, "format": "json"},
-                    headers={"Authorization": f"Token {cfg.get('token', '')}"},
-                )
-                resp.raise_for_status()
-                rows = resp.json() or []
-        except Exception as e:
-            logger.warning(
-                f"⚠️ portfolio read failed for owner {owner}: {type(e).__name__}"
-            )
-            return {**base, "error": "read failed"}
-
-        holdings: Dict[str, Dict] = {}
-        for r in rows if isinstance(rows, list) else []:
-            if not isinstance(r, dict):
-                continue
-            sym = r.get("symbol")
-            if not sym or sym in holdings:  # ORDER BY time DESC → first = latest
-                continue
-            holdings[sym] = {"price": r.get("price"), "as_of": r.get("time")}
-        return {"owner_id": owner, "holdings": holdings, "symbol_count": len(holdings)}
+        holdings = {
+            sym: dict(point)
+            for sym, point in self._recorded.get(_owner_tag(owner), {}).items()
+        }
+        result: Dict = {
+            "owner_id": owner,
+            "holdings": holdings,
+            "symbol_count": len(holdings),
+        }
+        if not holdings:
+            result["message"] = "no price recorded for you since the plugin started"
+        return result

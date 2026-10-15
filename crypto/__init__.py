@@ -4,16 +4,18 @@ Backfills daily close prices for the configured symbols from a public, **keyless
 source (Yahoo Finance) — from the earliest available record (or a configured start
 date) up to today — into InfluxDB as a time series (measurement ``crypto_price``, tag
 ``symbol``, field ``close``, one point per day at that day's timestamp). It is
-idempotent + incremental: each run resumes from the latest timestamp already in
-InfluxDB (queried via the v3 SQL API), so the first run does the full history and
-subsequent (registry-hourly) runs only fetch the new day(s). Financial data, so no
-gaps and no double-counting.
+idempotent + incremental: each run resumes from the latest timestamp already
+stored (the platform's ``timeseries.latest``), so the first run does the full
+history and subsequent (registry-hourly) runs only fetch the new day(s). Financial
+data, so no gaps and no double-counting.
 
 ``get_price`` is an on-demand action + Ollama tool returning the latest close.
 
 Uses only deps already in the plugin-registry image (``httpx``) — Yahoo over its
-public chart API, InfluxDB over its HTTP write (line protocol) + v3 query APIs. No new
-dependency, bind-mounted (edit + ``docker restart minder-plugin-registry``).
+public chart API. Points are written through the time-series handle the platform
+binds at load (``bind_timeseries``): line protocol in, scoped to this plugin's
+``TIMESERIES`` measurements. The plugin holds no InfluxDB address or token; with no
+handle bound the sink is simply skipped.
 
 Config (env on plugin-registry; all optional — keyless defaults):
   CRYPTO_SYMBOLS     Yahoo symbols, comma-sep (default "BTC-USD,ETH-USD"; use e.g.
@@ -28,12 +30,11 @@ import logging
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from minder_plugin_sdk import influx as influx_helpers
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import PluginMetadata, line_protocol
 
 __all__ = ["CryptoPlugin"]
 
@@ -50,9 +51,13 @@ _ALIASES = {
     "eth": "ETH-USD",
 }
 _MEASUREMENT = "crypto_price"
+# The platform caps one timeseries.write batch (5,000 lines); a full backfill is
+# written in ascending chunks below that, so a failed chunk leaves a clean
+# resume point.
+_WRITE_CHUNK = 2000
 
-# Symbols come from config (CRYPTO_SYMBOLS, API-settable) and are interpolated into
-# an InfluxDB SQL query + line protocol — restrict to a safe charset so a config
+# Symbols come from config (CRYPTO_SYMBOLS, API-settable) and are used as a tag in
+# line protocol and a resume lookup — restrict to a safe charset so a config
 # value can't break out into injection (or corrupt line protocol with a space/comma).
 # \Z (not $) -- $ matches just before a trailing newline too, so "BTC-USD\n" would
 # pass this guard and then corrupt the line-protocol payload with an embedded newline.
@@ -64,6 +69,11 @@ class CryptoPlugin:
 
     # Where this plugin connects (contract-v2 EGRESS declaration).
     EGRESS = ["query1.finance.yahoo.com"]
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["crypto_price"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     ACTIONS = frozenset({"refresh", "get_price"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
@@ -243,34 +253,60 @@ class CryptoPlugin:
                 )
         return out
 
-    # ── InfluxDB (write history + query resume point) ──────────────────────────
-    def _influx_cfg(self) -> Optional[Dict]:
-        cfg = self.config.get("influxdb") or {}
-        return cfg if (self.sink_influxdb and cfg.get("enabled")) else None
+    # ── time series (write history + query resume point) ───────────────────────
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle:
+        ``write(lines, precision)`` and ``latest(measurement, tag_key,
+        tag_value)``, scoped to ``TIMESERIES``."""
+        self._timeseries = handle
+
+    def _sink(self) -> Any:
+        return self._timeseries if self.sink_influxdb else None
 
     async def _latest_influx_date(self, symbol: str) -> Optional[date]:
-        """Latest day already stored for symbol (v3 SQL query), or None if empty."""
-        return await influx_helpers.latest_influx_date(
-            http_timeout=self.http_timeout,
-            cfg=self._influx_cfg(),
-            safe_pattern=_SAFE_SYMBOL,
-            measurement=_MEASUREMENT,
-            tag_key="symbol",
-            tag_value=symbol,
-        )
+        """Latest day already stored for symbol, or None (empty, sink off, or the
+        store unavailable: the caller then backfills from the start)."""
+        sink = self._sink()
+        if sink is None or not _SAFE_SYMBOL.match(symbol):
+            return None
+        try:
+            t = await sink.latest(_MEASUREMENT, "symbol", symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ resume query failed for {symbol}: {type(e).__name__}")
+            return None
+        if not t:
+            return None
+        try:
+            return datetime.fromisoformat(str(t).replace("Z", "")).date()
+        except ValueError:
+            return None
 
     async def _write_history(self, symbol: str, points: List[Tuple[int, float]]) -> int:
-        """Write [(ts, close)] to InfluxDB; return count written (0 if sink off/empty)."""
-        return await influx_helpers.write_history(
-            http_timeout=self.http_timeout,
-            cfg=self._influx_cfg(),
-            safe_pattern=_SAFE_SYMBOL,
-            measurement=_MEASUREMENT,
-            tag_key="symbol",
-            tag_value=symbol,
-            field_name="close",
-            points=points,
-        )
+        """Write [(ts, close)]; return the count written (0 if sink off/empty)."""
+        sink = self._sink()
+        if sink is None or not points:
+            return 0
+        if not _SAFE_SYMBOL.match(symbol):
+            logger.warning(f"⚠️ Skipping write for unsafe symbol: {symbol!r}")
+            return 0
+        # line_protocol escapes the tag and drops a non-finite close.
+        lines = [
+            ln
+            for ts, close in points
+            if (
+                ln := line_protocol(
+                    _MEASUREMENT, {"symbol": symbol}, {"close": close}, ts
+                )
+            )
+        ]
+        written = 0
+        for i in range(0, len(lines), _WRITE_CHUNK):
+            try:
+                written += int(await sink.write(lines[i : i + _WRITE_CHUNK], "s"))
+            except Exception as e:
+                logger.warning(f"⚠️ write failed for {symbol}: {type(e).__name__}")
+                break
+        return written
 
     # ── registry-driven reads ────────────────────────────────────────────────
     async def collect_data(self) -> Dict:

@@ -284,63 +284,43 @@ def test_refresh_calls_collect_data(monkeypatch):
     assert asyncio.run(p.refresh()) == {"ok": True}
 
 
-# ── _write_influxdb (plugin-local sink, not the SDK helper) ──────────────────
-class _WriteClient:
-    """httpx.AsyncClient stand-in that records a POST (or raises)."""
-
-    def __init__(self, *a, exc=None, **k):
-        self._exc = exc
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def post(self, url, **kwargs):
-        if self._exc:
-            raise self._exc
-        return _FakeResp("")
+# ── _write_influxdb: through the platform's time-series handle ───────────────
+def test_write_influxdb_noop_without_a_handle():
+    # A host that binds no handle (or the old raw-credential config) writes nothing.
+    p = NewsPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    p.sink_influxdb = True
+    assert asyncio.run(p._write_influxdb({"a": 1})) is False
 
 
-def test_write_influxdb_noop_when_sink_disabled():
+def test_write_influxdb_noop_when_sink_disabled(bind_timeseries):
     p = NewsPlugin()
+    ts = bind_timeseries(p)
     p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
     assert asyncio.run(p._write_influxdb({"a": 1})) is False
+    assert ts.batches == []
 
 
-def test_write_influxdb_noop_when_influxdb_not_enabled():
+def test_write_influxdb_noop_when_counts_empty(bind_timeseries):
     p = NewsPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": False}}
-    assert asyncio.run(p._write_influxdb({"a": 1})) is False
-
-
-def test_write_influxdb_noop_when_counts_empty():
-    p = NewsPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
+    ts = bind_timeseries(p)
     assert asyncio.run(p._write_influxdb({})) is False
+    assert ts.batches == []
 
 
-def test_write_influxdb_success(monkeypatch):
+def test_write_influxdb_success(bind_timeseries):
     p = NewsPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True, "host": "h", "port": 1, "token": "t"}}
-    monkeypatch.setattr(news.httpx, "AsyncClient", _WriteClient)
+    ts = bind_timeseries(p)
+    assert p.TIMESERIES == {"measurements": ["news"]}
     assert asyncio.run(p._write_influxdb({"feed a": 3})) is True
+    assert ts.batches == [(["news,feed=feed\\ a item_count=3i"], "s")]
 
 
-def test_write_influxdb_failure_returns_false(monkeypatch):
+def test_write_influxdb_failure_returns_false(bind_timeseries):
     p = NewsPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    monkeypatch.setattr(
-        news.httpx,
-        "AsyncClient",
-        lambda *a, **k: _WriteClient(exc=RuntimeError("boom")),
-    )
+    bind_timeseries(p, fail_write=RuntimeError("boom"))
     assert asyncio.run(p._write_influxdb({"a": 1})) is False
 
 

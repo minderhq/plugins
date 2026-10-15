@@ -71,32 +71,6 @@ def test_plugin_lifecycle_runtime(pkg):
         ), f"{pkg}: health_check() must return {{'healthy': bool}}, got {health!r}"
 
 
-class _CaptureClient:
-    """Fake httpx.AsyncClient that records the line-protocol body instead of
-    hitting the network — used to assert the hand-rolled InfluxDB writers escape
-    tag values correctly."""
-
-    last_body = ""
-
-    def __init__(self, *a, **k):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *a):
-        return False
-
-    async def post(self, url, **kw):
-        _CaptureClient.last_body = kw.get("content") or kw.get("data") or ""
-
-        class _Resp:
-            def raise_for_status(self):
-                return None
-
-        return _Resp()
-
-
 @pytest.mark.parametrize(
     "pkg,method,payload,measurement",
     [
@@ -111,20 +85,19 @@ class _CaptureClient:
     ],
 )
 def test_influx_writer_escapes_tag_specials(
-    pkg, method, payload, measurement, monkeypatch
+    pkg, method, payload, measurement, bind_timeseries
 ):
-    """news/weather build InfluxDB line protocol by hand; a config feed/location
+    """news/weather build line protocol from config-sourced tags; a feed/location
     name with ',' '=' or ' ' must be escaped or it silently corrupts the tag set
     (regression: previously only spaces were escaped)."""
     module = importlib.import_module(pkg)
     plugin = _plugin_class(module)()
     plugin.sink_influxdb = True
-    plugin.config = {"influxdb": {"enabled": True}}
-    monkeypatch.setattr(module.httpx, "AsyncClient", _CaptureClient)
+    ts = bind_timeseries(plugin)
 
     ok = asyncio.run(getattr(plugin, method)(payload))
     assert ok is True, f"{pkg}: write returned False (body not sent)"
-    body = _CaptureClient.last_body
+    body = "\n".join(ts.lines)
     tag = "a\\,b\\=c\\ d"  # all three specials escaped
     assert (
         f"{measurement}," in body and f"={tag} " in body

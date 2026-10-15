@@ -223,56 +223,78 @@ def test_fetch_history_empty_or_missing_result_shapes(monkeypatch, payload):
     assert out == []
 
 
-# ── _influx_cfg gating (pure plugin logic) ───────────────────────────────────
-def test_influx_cfg_none_when_sink_disabled():
-    p = CryptoPlugin()
-    p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
-    assert p._influx_cfg() is None
+# ── time series: the platform handle (bind_timeseries), no raw credentials ────
+def test_declares_its_measurement_and_holds_no_influx_credentials():
+    p = CryptoPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    assert p.TIMESERIES == {"measurements": ["crypto_price"]}
+    assert not hasattr(p, "_influx_cfg")
 
 
-def test_influx_cfg_none_when_influxdb_not_enabled():
-    p = CryptoPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": False}}
-    assert p._influx_cfg() is None
-
-
-def test_influx_cfg_none_when_influxdb_missing():
-    p = CryptoPlugin()
-    p.sink_influxdb = True
-    p.config = {}
-    assert p._influx_cfg() is None
-
-
-def test_influx_cfg_returns_cfg_when_enabled():
-    p = CryptoPlugin()
-    p.sink_influxdb = True
-    cfg = {"enabled": True, "host": "h", "port": 1}
-    p.config = {"influxdb": cfg}
-    assert p._influx_cfg() is cfg
-
-
-# The InfluxDB read/write helpers are the SDK's (tested in the SDK's own
-# test_influx.py); here we only assert the plugin's own gating short-circuits
-# before any network path when the sink is off / there's nothing to write.
-def test_latest_influx_date_none_when_sink_off():
-    p = CryptoPlugin()
-    p.sink_influxdb = False
+def test_no_handle_means_no_resume_point_and_nothing_written():
+    p = CryptoPlugin({"influxdb": {"enabled": True, "token": "t"}})
     assert asyncio.run(p._latest_influx_date("BTC-USD")) is None
-
-
-def test_write_history_zero_when_sink_off():
-    p = CryptoPlugin()
-    p.sink_influxdb = False
     assert asyncio.run(p._write_history("BTC-USD", [(1, 2.0)])) == 0
 
 
-def test_write_history_zero_when_points_empty():
+def test_sink_off_skips_the_handle(bind_timeseries):
     p = CryptoPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    assert asyncio.run(p._write_history("BTC-USD", [])) == 0
+    ts = bind_timeseries(
+        p, latest={("crypto_price", "symbol", "BTC-USD"): "2024-01-01"}
+    )
+    p.sink_influxdb = False
+    assert asyncio.run(p._latest_influx_date("BTC-USD")) is None
+    assert asyncio.run(p._write_history("BTC-USD", [(1, 2.0)])) == 0
+    assert ts.batches == [] and ts.latest_calls == []
+
+
+def test_write_history_writes_line_protocol_through_the_handle(bind_timeseries):
+    p = CryptoPlugin()
+    ts = bind_timeseries(p)
+    n = asyncio.run(p._write_history("BTC-USD", [(100, 1.5), (200, float("nan"))]))
+    assert n == 1  # the non-finite close is dropped, not sent
+    assert ts.batches == [(["crypto_price,symbol=BTC-USD close=1.5 100"], "s")]
+
+
+def test_write_history_chunks_a_full_backfill_below_the_batch_cap(bind_timeseries):
+    p = CryptoPlugin()
+    ts = bind_timeseries(p)
+    points = [(i, float(i)) for i in range(1, 6001)]
+    assert asyncio.run(p._write_history("BTC-USD", points)) == 6000
+    assert [len(b) for b, _ in ts.batches] == [2000, 2000, 2000]
+
+
+def test_write_history_stops_at_a_failed_chunk(bind_timeseries):
+    p = CryptoPlugin()
+    ts = bind_timeseries(p, fail_write=RuntimeError("store down, token=x"))
+    assert asyncio.run(p._write_history("BTC-USD", [(1, 2.0)])) == 0
+    assert ts.batches == []
+
+
+def test_write_history_refuses_unsafe_symbol(bind_timeseries):
+    p = CryptoPlugin()
+    ts = bind_timeseries(p)
+    assert asyncio.run(p._write_history("BTC USD\n", [(1, 2.0)])) == 0
+    assert asyncio.run(p._latest_influx_date("BTC USD\n")) is None
+    assert ts.batches == [] and ts.latest_calls == []
+
+
+def test_latest_influx_date_parses_the_platform_timestamp(bind_timeseries):
+    p = CryptoPlugin()
+    ts = bind_timeseries(
+        p, latest={("crypto_price", "symbol", "BTC-USD"): "2024-03-05T00:00:00Z"}
+    )
+    assert asyncio.run(p._latest_influx_date("BTC-USD")) == date(2024, 3, 5)
+    assert ts.latest_calls == [("crypto_price", "symbol", "BTC-USD")]
+    assert asyncio.run(p._latest_influx_date("ETH-USD")) is None
+
+
+def test_latest_influx_date_is_fail_soft(bind_timeseries):
+    p = CryptoPlugin()
+    bind_timeseries(p, fail_latest=RuntimeError("unavailable"))
+    assert asyncio.run(p._latest_influx_date("BTC-USD")) is None
+    p2 = CryptoPlugin()
+    bind_timeseries(p2, latest={("crypto_price", "symbol", "BTC-USD"): "garbage"})
+    assert asyncio.run(p2._latest_influx_date("BTC-USD")) is None
 
 
 # ── collect_data — the state-dependent backfill-vs-append branching ──────────
