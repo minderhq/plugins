@@ -1,96 +1,178 @@
 """Unit tests for the telegraf config-manager plugin (this repo's telegraf/).
 
-Pure-logic coverage — managed-region parsing, TOML validation, marker guards — with
-a temp config file. No Docker: reload=False keeps every call off the docker socket.
+Contract v2: the plugin writes the managed region only through
+``self.ctx.telegraf.*``, so these tests bind the SDK's FakePlatformContext. No
+file and no Docker are involved.
 """
 
 import asyncio
 
 import pytest
+from minder_plugin_sdk import (
+    CapabilityDenied,
+    CapabilityInvalid,
+    CapabilityUnavailable,
+    FakePlatformContext,
+    declaration_errors,
+)
+from minder_plugin_sdk.context import (
+    CAP_TELEGRAF_CLEAR_MANAGED_REGION,
+    CAP_TELEGRAF_RELOAD,
+    CAP_TELEGRAF_SET_MANAGED_REGION,
+)
 
 from telegraf import TelegrafPlugin
 
-_MARKERS = (
-    "# >>> minder telegraf-plugin managed >>>\n"
-    "# <<< minder telegraf-plugin managed <<<\n"
-)
-_BASE = '[agent]\n  interval = "10s"\n\n' + _MARKERS
+_REGION = '[[inputs.net_response]]\n  protocol = "tcp"\n  address = "10.0.0.1:22"'
 
 
-@pytest.fixture
-def cfg(tmp_path, monkeypatch):
-    p = tmp_path / "telegraf.conf"
-    p.write_text(_BASE, encoding="utf-8")
-    monkeypatch.setenv("TELEGRAF_CONFIG_PATH", str(p))
-    return p
-
-
-def test_register_and_health(cfg):
+def _bound(**kwargs):
     pl = TelegrafPlugin({})
+    ctx = FakePlatformContext.for_plugin(pl, **kwargs)
+    pl.bind_context(ctx)
+    return pl, ctx
+
+
+def test_declarations_are_contract_v2_and_manage_telegraf():
+    pl = TelegrafPlugin({})
+    assert pl.CONTRACT_VERSION == 2
+    assert pl.MANAGES == ["telegraf"]
+    assert pl.EGRESS == []
+    assert declaration_errors(pl) == []
+
+
+def test_register_and_health_when_granted():
+    pl, _ = _bound()
     md = asyncio.run(pl.register())
     assert md.name == "telegraf"
     assert "config-management" in md.capabilities
-    assert asyncio.run(pl.health_check())["healthy"] is True
+    asyncio.run(pl.initialize())
+    health = asyncio.run(pl.health_check())
+    assert health == {"healthy": True, "managed": True}
 
 
-def test_empty_region_lists_no_inputs(cfg):
+def test_unhealthy_without_a_bound_context():
     pl = TelegrafPlugin({})
-    assert pl._markers_present() is True
-    assert pl.list_managed_inputs() == []
+    asyncio.run(pl.initialize())
+    assert asyncio.run(pl.health_check()) == {"healthy": False, "managed": False}
 
 
-def test_set_managed_region_writes_and_parses(cfg):
-    pl = TelegrafPlugin({})
-    asyncio.run(
-        pl.set_managed_region(
-            "[[inputs.internal]]\n  collect_memstats = false", reload=False
+def test_unhealthy_before_initialize():
+    pl, _ = _bound()
+    assert asyncio.run(pl.health_check())["healthy"] is False
+
+
+def test_set_managed_region_goes_through_the_context():
+    pl, ctx = _bound()
+    result = asyncio.run(pl.set_managed_region("\n" + _REGION + "\n", reload=False))
+    assert result["written"] is True
+    # Surrounding newlines are trimmed before the platform sees the region.
+    assert ctx.telegraf_region == _REGION
+    assert pl.list_managed_inputs() == ["net_response"]
+    assert ctx.telegraf_reloads == []
+
+
+def test_set_managed_region_reloads_by_default():
+    pl, ctx = _bound()
+    result = asyncio.run(pl.set_managed_region(_REGION))
+    assert ctx.telegraf_reloads == [False]
+    assert "reload" in result
+    assert ctx.called(CAP_TELEGRAF_RELOAD)[0].args == {"force": False}
+
+
+def test_platform_rejection_is_a_value_error_and_keeps_the_old_view():
+    def reject(_toml):
+        raise CapabilityInvalid(
+            CAP_TELEGRAF_SET_MANAGED_REGION, "input type is not allowlisted"
         )
-    )
-    assert pl.list_managed_inputs() == ["internal"]
-    # config outside the managed region is preserved
-    assert "[agent]" in cfg.read_text(encoding="utf-8")
+
+    pl, ctx = _bound()
+    asyncio.run(pl.set_managed_region(_REGION, reload=False))
+    ctx.telegraf_validator = reject
+    with pytest.raises(ValueError, match="not allowlisted"):
+        asyncio.run(pl.set_managed_region("[[inputs.exec]]", reload=False))
+    assert pl.list_managed_inputs() == ["net_response"]
 
 
-def test_bad_toml_rejected_without_writing(cfg):
-    pl = TelegrafPlugin({})
-    before = cfg.read_text(encoding="utf-8")
+def test_non_string_body_is_rejected_before_the_platform():
+    pl, ctx = _bound()
     with pytest.raises(ValueError):
-        asyncio.run(pl.set_managed_region("[[x]] bad !!!", reload=False))
-    assert cfg.read_text(encoding="utf-8") == before  # untouched — telegraf protected
+        asyncio.run(pl.set_managed_region(123, reload=False))  # type: ignore[arg-type]
+    assert ctx.calls == []
 
 
-def test_clear_restores_empty_region(cfg):
-    pl = TelegrafPlugin({})
-    asyncio.run(pl.set_managed_region("[[inputs.internal]]", reload=False))
+def test_denied_and_unavailable_propagate():
+    pl, _ = _bound(denied={"telegraf"})
+    with pytest.raises(CapabilityDenied):
+        asyncio.run(pl.set_managed_region(_REGION, reload=False))
+    pl, _ = _bound(unavailable={CAP_TELEGRAF_SET_MANAGED_REGION})
+    with pytest.raises(CapabilityUnavailable):
+        asyncio.run(pl.set_managed_region(_REGION, reload=False))
+    # Unbound: the SDK's default context refuses every call.
+    with pytest.raises(CapabilityUnavailable):
+        asyncio.run(TelegrafPlugin({}).set_managed_region(_REGION, reload=False))
+
+
+def test_clear_uses_the_clear_capability():
+    pl, ctx = _bound()
+    asyncio.run(pl.set_managed_region(_REGION, reload=False))
     asyncio.run(pl.clear_managed_region(reload=False))
+    assert ctx.telegraf_region == ""
     assert pl.list_managed_inputs() == []
+    assert len(ctx.called(CAP_TELEGRAF_CLEAR_MANAGED_REGION)) == 1
+    assert len(ctx.called(CAP_TELEGRAF_SET_MANAGED_REGION)) == 1  # only the set
 
 
-def test_missing_markers_are_guarded(tmp_path, monkeypatch):
-    p = tmp_path / "telegraf.conf"
-    p.write_text("[agent]\n", encoding="utf-8")  # no managed markers
-    monkeypatch.setenv("TELEGRAF_CONFIG_PATH", str(p))
+def test_setting_an_empty_region_clears_it():
+    pl, ctx = _bound()
+    asyncio.run(pl.set_managed_region("\n\n", reload=False))
+    assert ctx.called(CAP_TELEGRAF_CLEAR_MANAGED_REGION)
+    assert not ctx.called(CAP_TELEGRAF_SET_MANAGED_REGION)
+
+
+def test_reload_default_and_forced():
+    pl, ctx = _bound()
+    asyncio.run(pl.reload())
+    asyncio.run(pl.reload(force_restart=True))
+    assert ctx.telegraf_reloads == [False, True]
+
+
+def test_collect_and_analyze_report_the_last_write():
+    pl, _ = _bound()
+    data = asyncio.run(pl.collect_data())
+    assert data["managed"] is True
+    assert data["region_written"] is False
+    assert data["managed_inputs"] == []
+    asyncio.run(pl.set_managed_region(_REGION, reload=False))
+    data = asyncio.run(pl.collect_data())
+    assert data["region_written"] is True
+    assert data["last_write"]["inputs"] == 1
+    assert asyncio.run(pl.analyze()) == {
+        "managed_input_count": 1,
+        "managed_inputs": ["net_response"],
+    }
+
+
+def test_shutdown_sets_status():
     pl = TelegrafPlugin({})
-    assert pl._markers_present() is False
-    assert pl.list_managed_inputs() == []
-    with pytest.raises(RuntimeError):
-        asyncio.run(pl.set_managed_region("[[inputs.internal]]", reload=False))
+    asyncio.run(pl.shutdown())
+    assert pl.status == "shutdown"
 
 
-def test_actions_whitelist_is_read_only_safe(cfg):
-    # ACTIONS must expose only the intended write/reload methods.
-    assert TelegrafPlugin.ACTIONS == frozenset(
-        {"set_managed_region", "clear_managed_region", "reload"}
-    )
+def test_actions_whitelist_is_read_only_safe():
+    pl = TelegrafPlugin({})
+    assert pl.ACTIONS == {"set_managed_region", "clear_managed_region", "reload"}
+    for name in pl.ACTIONS:
+        assert callable(getattr(pl, name))
 
 
-def test_config_writing_actions_are_admin_only(cfg):
-    # set_managed_region/clear_managed_region write caller-supplied content
-    # straight into a live config a privileged process then loads/executes --
-    # routes.plugins.invoke_plugin_action gates anything in this set to the
-    # admin role, unlike the rest of ACTIONS (found in a security re-audit).
-    assert TelegrafPlugin.ADMIN_ONLY_ACTIONS == frozenset(
-        {"set_managed_region", "clear_managed_region"}
-    )
-    assert TelegrafPlugin.ADMIN_ONLY_ACTIONS <= TelegrafPlugin.ACTIONS
-    assert "reload" not in TelegrafPlugin.ADMIN_ONLY_ACTIONS
+def test_every_action_is_admin_only():
+    # Writing the region changes what telegraf monitors, and reload can force a
+    # container restart: none of it is for an ordinary signed-in user.
+    pl = TelegrafPlugin({})
+    assert pl.ADMIN_ONLY_ACTIONS == {
+        "set_managed_region",
+        "clear_managed_region",
+        "reload",
+    }
+    assert pl.ADMIN_ONLY_ACTIONS == pl.ACTIONS

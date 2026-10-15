@@ -41,6 +41,10 @@ _CURRENT_FIELDS = "temperature_2m,relative_humidity_2m,wind_speed_10m"
 class WeatherPlugin:
     """Poll a keyless weather API for configured locations; sink the series to InfluxDB."""
 
+    # Where this plugin connects (contract-v2 EGRESS declaration): the default
+    # WEATHER_API_BASE / WEATHER_GEOCODE_BASE hosts.
+    EGRESS = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+
     ACTIONS = frozenset({"refresh", "get_weather"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
     # "refresh" stays POST + JWT-gated since it writes to InfluxDB.

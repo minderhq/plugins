@@ -68,7 +68,14 @@
         "category": "ai-tool"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "export.arxiv.org"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "crypto",
@@ -131,7 +138,14 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "query1.finance.yahoo.com"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "frankfurter",
@@ -225,7 +239,14 @@
         "category": "data-source"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "api.frankfurter.app"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "github",
@@ -303,7 +324,14 @@
         "category": "data-source"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "api.github.com"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "hackernews",
@@ -366,7 +394,14 @@
         "category": "data-source"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "hacker-news.firebaseio.com"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "network",
@@ -417,7 +452,14 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 2,
+      "egress": "lan",
+      "manages": [],
+      "timeseries": null,
+      "dependencies": [
+        "telegraf"
+      ]
     },
     {
       "package": "news",
@@ -482,7 +524,12 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": "public",
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "openlibrary",
@@ -550,7 +597,14 @@
         "category": "ai-tool"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "openlibrary.org"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "portfolio",
@@ -601,7 +655,14 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "query1.finance.yahoo.com"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "tefas_funds",
@@ -664,12 +725,19 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "www.tefas.gov.tr"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "telegraf",
       "name": "telegraf",
-      "version": "1.0.0",
+      "version": "2.0.0",
       "description": "Manages the telegraf config's managed region and reloads telegraf.",
       "author": "Minder <core@minder.local>",
       "capabilities": [
@@ -689,7 +757,14 @@
       "ai_tools": [],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 2,
+      "egress": [],
+      "manages": [
+        "telegraf"
+      ],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "weather",
@@ -747,7 +822,15 @@
       ],
       "display": {},
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "api.open-meteo.com",
+        "geocoding-api.open-meteo.com"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "webcrawl",
@@ -797,22 +880,14 @@
           "WEBCRAWL_MAX_BYTES": {
             "type": "integer",
             "default": 2000000,
-            "description": "Per-page download/processing cap in bytes."
+            "description": "Per-page download/processing cap in bytes (at most just under 10 MiB, the knowledge-base document limit).",
+            "minimum": 1000,
+            "maximum": 10420224
           },
           "WEBCRAWL_RATE_LIMIT": {
             "type": "number",
             "default": 1.0,
             "description": "Politeness delay between fetches, in seconds."
-          },
-          "WEBCRAWL_RAG_URL": {
-            "type": "string",
-            "default": "http://minder-rag-pipeline:8004",
-            "description": "rag-pipeline base URL the upload call targets."
-          },
-          "WEBCRAWL_SERVICE_TOKEN": {
-            "type": "string",
-            "default": "",
-            "description": "X-Service-Token for the internal upload call (matches rag-pipeline's SERVICE_SYNC_TOKEN). Leave blank if the upload endpoint is reached with a user JWT instead."
           }
         }
       },
@@ -843,14 +918,6 @@
         "WEBCRAWL_RATE_LIMIT": {
           "ui:widget": "number",
           "ui:group": "Crawl bounds"
-        },
-        "WEBCRAWL_RAG_URL": {
-          "ui:widget": "text",
-          "ui:group": "Target"
-        },
-        "WEBCRAWL_SERVICE_TOKEN": {
-          "ui:widget": "secret",
-          "ui:group": "Target"
         }
       },
       "ai_tools": [],
@@ -862,7 +929,12 @@
         "category": "connector"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 2,
+      "egress": "public",
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     },
     {
       "package": "wikipedia",
@@ -926,7 +998,14 @@
         "category": "ai-tool"
       },
       "runtime": "python",
-      "tier": "T2"
+      "tier": "T2",
+      "contract_version": 1,
+      "egress": [
+        "*.wikipedia.org"
+      ],
+      "manages": [],
+      "timeseries": null,
+      "dependencies": []
     }
   ]
 }

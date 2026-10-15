@@ -119,6 +119,10 @@ _ATOM = "{http://www.w3.org/2005/Atom}"
 class NewsPlugin:
     """Fetch headlines from keyless RSS/Atom feeds; serve them + a volume metric."""
 
+    # Where this plugin connects (contract-v2 EGRESS declaration): the
+    # configured RSS feeds (NEWS_FEEDS), anywhere on the public web.
+    EGRESS = "public"
+
     ACTIONS = frozenset({"refresh", "get_news"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
     # "refresh" stays POST + JWT-gated since it writes to InfluxDB.

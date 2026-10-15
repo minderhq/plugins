@@ -84,6 +84,9 @@ class PortfolioPlugin:
     """Per-user holdings/watchlist price tracking (Yahoo, keyless) into InfluxDB,
     tagged with the owning user's own owner_id -- genuinely private data."""
 
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["query1.finance.yahoo.com"]
+
     PRIVATE_PER_USER = True
 
     # Owner-scoped read-back (#1035). In ACTIONS (not READ_ONLY_ACTIONS) so it is

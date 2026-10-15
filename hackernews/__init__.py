@@ -24,6 +24,9 @@ _API = "https://hacker-news.firebaseio.com/v0"
 
 
 class HackerNewsPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["hacker-news.firebaseio.com"]
+
     DISPLAY = {
         "label": "Hacker News",
         "summary": "Current Hacker News top stories, plus an ask-for-headlines tool.",

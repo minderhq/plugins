@@ -26,6 +26,7 @@ from typing import Any, Dict, List
 from minder_plugin_sdk import (
     build_tool_definitions,
     capabilities,
+    contract_version,
     requirements,
     resolve_config_schema,
 )
@@ -80,6 +81,30 @@ def _plugin_class(module: Any) -> Any:
     raise RuntimeError(f"{module.__name__}: no plugin class with register()")
 
 
+def _declarations(cls: Any, plugin: Any, md: Any) -> Dict[str, Any]:
+    """The contract-v2 declarations a host derives grants and placement from
+    (plugin-sdk ``declarations``): ``egress`` (``"public"`` / ``"lan"`` / a host
+    list, ``None`` when undeclared), ``manages`` (sidecars reached through
+    ``ctx.<name>.*``), ``timeseries`` (the declared measurements, ``None`` when
+    undeclared) and ``dependencies`` (the ``plugins.invoke`` edges)."""
+    egress = getattr(cls, "EGRESS", None)
+    if isinstance(egress, (list, tuple, set, frozenset)):
+        egress = sorted(egress)
+    timeseries = getattr(cls, "TIMESERIES", None)
+    measurements = (
+        sorted(timeseries.get("measurements", []))
+        if isinstance(timeseries, dict)
+        else None
+    )
+    return {
+        "contract_version": contract_version(plugin),
+        "egress": egress,
+        "manages": sorted(getattr(cls, "MANAGES", None) or []),
+        "timeseries": measurements,
+        "dependencies": sorted(getattr(md, "dependencies", None) or []),
+    }
+
+
 def _entry(pkg: str) -> Dict[str, Any]:
     module = importlib.import_module(pkg)
     plugin = _plugin_class(module)()
@@ -99,6 +124,7 @@ def _entry(pkg: str) -> Dict[str, Any]:
         "display": getattr(type(plugin), "DISPLAY", {}),
         "runtime": "python",
         "tier": compute_tier("python"),
+        **_declarations(type(plugin), plugin, md),
     }
 
 

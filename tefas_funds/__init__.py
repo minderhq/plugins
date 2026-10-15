@@ -64,6 +64,9 @@ except ImportError:  # pragma: no cover
 class TefasPlugin:
     """Backfill + daily-incremental TEFAS fund prices into InfluxDB (tefas-crawler)."""
 
+    # Where this plugin connects (contract-v2 EGRESS declaration): via the tefas-crawler library.
+    EGRESS = ["www.tefas.gov.tr"]
+
     ACTIONS = frozenset({"refresh", "get_fund_price"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
     # "refresh" stays POST + JWT-gated since it writes to InfluxDB.

@@ -101,3 +101,73 @@ def test_extract_neighbor_ips_skips_an_invalid_cidr_in_the_allowlist():
 def test_extract_neighbor_ips_skips_a_malformed_arp_ip():
     hosts = [{"snmp": {"arp": {"not-an-ip": "m1", "10.0.0.5": "m2"}}}]
     assert _extract_neighbor_ips(hosts, ["10.0.0.0/29"]) == ["10.0.0.5"]
+
+
+# ── _telegraf_config: values are TOML strings, never raw TOML ─────────────────
+import tomllib  # noqa: E402
+
+from network import _telegraf_region  # noqa: E402
+
+_EVIL = 'x"\n[[inputs.exec]]\ncommands = ["sh"]\n]'
+
+
+def test_telegraf_config_escapes_tenant_community_and_address():
+    hosts = [
+        {"host": _EVIL, "ports": [{"port": 22, "protocol": "tcp"}], "snmp": {"a": 1}}
+    ]
+    cfg = _telegraf_config(hosts, snmp_community=_EVIL, tenant_id=_EVIL)
+    parsed = tomllib.loads(cfg)
+    # Only the two expected input types: nothing broke out of a string.
+    assert set(parsed) == {"inputs"}
+    assert set(parsed["inputs"]) == {"net_response", "snmp"}
+    (net,) = parsed["inputs"]["net_response"]
+    (snmp,) = parsed["inputs"]["snmp"]
+    assert net["address"] == f"{_EVIL}:22"
+    assert net["tags"]["tenant_id"] == _EVIL
+    assert snmp["community"] == _EVIL
+    assert snmp["agents"] == [f"udp://{_EVIL}:161"]
+    assert snmp["tags"]["tenant_id"] == _EVIL
+
+
+def test_telegraf_config_tenant_with_braces_does_not_break_formatting():
+    hosts = [{"host": "10.0.0.1", "ports": [{"port": 22, "protocol": "tcp"}]}]
+    cfg = _telegraf_config(hosts, "public", tenant_id="{input}{0}")
+    net = tomllib.loads(cfg)["inputs"]["net_response"][0]
+    assert net["tags"]["tenant_id"] == "{input}{0}"
+
+
+def _busy_lan(n_hosts=256, ports=8):
+    return [
+        {
+            "host": f"10.0.{i // 256}.{i % 256}",
+            "ports": [{"port": p, "protocol": "tcp"} for p in range(1, ports + 1)],
+            "snmp": {"system": {}},
+        }
+        for i in range(n_hosts)
+    ]
+
+
+def test_telegraf_region_fits_the_platform_caps():
+    region, dropped = _telegraf_region(_busy_lan(), "public", "t1")
+    assert dropped > 0
+    assert len(region.encode("utf-8")) <= 64 * 1024
+
+    def _tables(v):
+        if isinstance(v, dict):
+            return 1 + sum(_tables(x) for x in v.values())
+        if isinstance(v, list):
+            return sum(_tables(x) for x in v)
+        return 0
+
+    parsed = tomllib.loads(region)
+    assert _tables(parsed) <= 512
+    kept = {a["address"].rsplit(":", 1)[0] for a in parsed["inputs"]["net_response"]}
+    # Whole hosts, lowest addresses first: a stable subset across cycles.
+    assert kept == {f"10.0.0.{i}" for i in range(len(kept))}
+    assert len(kept) + dropped == 256
+
+
+def test_telegraf_region_small_scan_is_not_truncated():
+    region, dropped = _telegraf_region(_busy_lan(3, 2), "public")
+    assert dropped == 0
+    assert len(tomllib.loads(region)["inputs"]["net_response"]) == 6

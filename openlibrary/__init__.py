@@ -39,6 +39,9 @@ def _clamp(value: object, default: int = 5) -> int:
 
 
 class OpenLibraryPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["openlibrary.org"]
+
     DISPLAY = {
         "label": "Open Library",
         "summary": "Search books on Open Library — a book-lookup tool for the LLM.",
