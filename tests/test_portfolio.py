@@ -85,56 +85,119 @@ def _writing(bind_timeseries, owner="alice", **kwargs):
     p = PortfolioPlugin()
     p.sink_influxdb = True
     p._owner_id = owner
-    return p, bind_timeseries(p, **kwargs)
+    ts = bind_timeseries(p, **kwargs)
+    ts.owner = owner  # the owner the platform acts for while collecting
+    return p, ts
 
 
-def test_get_value_before_any_write_is_empty():
+def _collect(p, ts, owner, closes, monkeypatch):
+    """One scheduled per-owner collection: the platform sets the owner on the
+    plugin (apply_config) and acts for it on the store."""
+    p.apply_config({"PORTFOLIO_HOLDINGS": ",".join(closes), "_owner_id": owner})
+    ts.owner = owner
+
+    async def fake_fetch(symbol):
+        return closes[symbol]
+
+    monkeypatch.setattr(p, "_fetch_latest_close", fake_fetch)
+    return asyncio.run(p.collect_data())
+
+
+def _read(p, ts, owner):
+    ts.owner = owner  # the platform reads for the calling owner only
+    return asyncio.run(p.get_value(owner))
+
+
+def test_get_value_without_a_handle_says_storage_is_unavailable():
     res = asyncio.run(PortfolioPlugin().get_value("u1"))
     assert res["holdings"] == {} and res["symbol_count"] == 0
-    assert "no price recorded" in res["message"]
+    assert "not available" in res["message"]
 
 
-def test_get_value_returns_the_last_point_written_for_that_owner(bind_timeseries):
-    p, _ = _writing(bind_timeseries)
-    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
-    asyncio.run(p._write_holding("AAPL", 1609545600, 190.0))  # newer wins
-    asyncio.run(p._write_holding("MSFT", 1609545600, 300.0))
-    res = asyncio.run(p.get_value("alice"))
-    assert res["symbol_count"] == 2
-    assert res["holdings"]["AAPL"] == {
-        "price": 190.0,
-        "as_of": "2021-01-02T00:00:00+00:00",
-    }
+def test_get_value_before_any_collection_is_empty(bind_timeseries):
+    p, ts = _writing(bind_timeseries)
+    res = _read(p, ts, "alice")
+    assert res["holdings"] == {} and "no price recorded" in res["message"]
+
+
+def test_get_value_reads_the_newest_points_from_the_store(bind_timeseries, monkeypatch):
+    p, ts = _writing(bind_timeseries)
+    _collect(p, ts, "alice", {"AAPL": (_ts(2021, 1, 1), 180.0)}, monkeypatch)
+    _collect(
+        p,
+        ts,
+        "alice",
+        {"AAPL": (_ts(2021, 1, 2), 190.0), "MSFT": (_ts(2021, 1, 2), 300.0)},
+        monkeypatch,
+    )
+    res = _read(p, ts, "alice")
+    assert res["symbol_count"] == 2 and "message" not in res
+    assert res["holdings"]["AAPL"] == {"price": 190.0, "as_of": "2021-01-02T00:00:00"}
     assert res["holdings"]["MSFT"]["price"] == 300.0
-    assert "message" not in res
+    # Value reads through latest(..., fields=[...]): the index, then each symbol.
+    assert ts.latest_fields_calls == [
+        ("portfolio_index", "kind", "holdings", ["symbols"]),
+        ("portfolio_holding", "symbol", "AAPL", ["price"]),
+        ("portfolio_holding", "symbol", "MSFT", ["price"]),
+    ]
 
 
-def test_get_value_never_returns_another_owners_holdings(bind_timeseries):
-    p, _ = _writing(bind_timeseries)
-    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
-    p._owner_id = "bob"
-    asyncio.run(p._write_holding("TSLA", 1609459200, 700.0))
-    assert set(asyncio.run(p.get_value("alice"))["holdings"]) == {"AAPL"}
-    assert set(asyncio.run(p.get_value("bob"))["holdings"]) == {"TSLA"}
-    assert asyncio.run(p.get_value("carol"))["holdings"] == {}
+def test_get_value_survives_a_restart(bind_timeseries, monkeypatch):
+    """A new plugin instance (a restart) bound to the same store answers from
+    the store, not from anything held in memory."""
+    p, ts = _writing(bind_timeseries)
+    _collect(p, ts, "alice", {"AAPL": (_ts(2021, 1, 2), 190.0)}, monkeypatch)
+    restarted = PortfolioPlugin()
+    restarted.bind_timeseries(ts)
+    res = _read(restarted, ts, "alice")
+    assert res["holdings"] == {"AAPL": {"price": 190.0, "as_of": "2021-01-02T00:00:00"}}
 
 
-def test_owner_ids_that_scrub_alike_never_share_holdings(bind_timeseries):
-    # "auth0|123" and "auth0_123" are different users even though both scrub to
-    # the same owner_id tag text; each must read back only their own record.
-    p, _ = _writing(bind_timeseries, owner="auth0|123")
-    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
-    p._owner_id = "auth0_123"
-    asyncio.run(p._write_holding("TSLA", 1609459200, 700.0))
-    assert set(asyncio.run(p.get_value("auth0|123"))["holdings"]) == {"AAPL"}
-    assert set(asyncio.run(p.get_value("auth0_123"))["holdings"]) == {"TSLA"}
+def test_get_value_never_returns_another_owners_holdings(bind_timeseries, monkeypatch):
+    p, ts = _writing(bind_timeseries)
+    _collect(p, ts, "alice", {"AAPL": (_ts(2021, 1, 1), 180.0)}, monkeypatch)
+    _collect(p, ts, "bob", {"TSLA": (_ts(2021, 1, 1), 700.0)}, monkeypatch)
+    assert set(_read(p, ts, "alice")["holdings"]) == {"AAPL"}
+    assert set(_read(p, ts, "bob")["holdings"]) == {"TSLA"}
+    assert _read(p, ts, "carol")["holdings"] == {}
 
 
-def test_owner_with_special_characters_reads_back_its_own_record(bind_timeseries):
-    p, _ = _writing(bind_timeseries, owner="auth0|a'b @c")
-    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
-    assert set(p._recorded) == {"auth0|a'b @c"}
-    assert set(asyncio.run(p.get_value("auth0|a'b @c"))["holdings"]) == {"AAPL"}
+def test_get_value_drops_symbols_the_owner_no_longer_tracks(
+    bind_timeseries, monkeypatch
+):
+    p, ts = _writing(bind_timeseries)
+    _collect(
+        p,
+        ts,
+        "alice",
+        {"AAPL": (_ts(2021, 1, 1), 180.0), "MSFT": (_ts(2021, 1, 1), 300.0)},
+        monkeypatch,
+    )
+    _collect(p, ts, "alice", {"AAPL": (_ts(2021, 1, 2), 181.0)}, monkeypatch)
+    assert set(_read(p, ts, "alice")["holdings"]) == {"AAPL"}
+
+
+def test_get_value_skips_unsafe_or_unpriced_index_entries(bind_timeseries):
+    p, ts = _writing(bind_timeseries)
+    asyncio.run(p._write_holding("AAPL", _ts(2021, 1, 1), 1.0))
+    ts.points[("alice", "portfolio_index", "kind", "holdings")] = (
+        _ts(2021, 1, 1),
+        {"symbols": "AAPL,bad symbol',NOPRICE"},
+    )
+    res = _read(p, ts, "alice")
+    assert set(res["holdings"]) == {"AAPL"}
+    assert [c[2] for c in ts.latest_fields_calls[1:]] == ["AAPL", "NOPRICE"]
+
+
+def test_get_value_read_failure_is_a_marker_not_a_raise(bind_timeseries):
+    p, ts = _writing(bind_timeseries, fail_latest=RuntimeError("store down, x=y"))
+    res = _read(p, ts, "alice")
+    assert res == {
+        "owner_id": "alice",
+        "holdings": {},
+        "symbol_count": 0,
+        "error": "read failed",
+    }
 
 
 # ── __init__ defaults / owner injection semantics ────────────────────────────
@@ -258,7 +321,7 @@ def test_fetch_latest_close_unsafe_symbol_skips_http_call(monkeypatch, caplog):
 def test_declares_its_measurement_and_holds_no_influx_credentials():
     p = PortfolioPlugin({"influxdb": {"enabled": True, "token": "t"}})
     p._owner_id = "alice"
-    assert p.TIMESERIES == {"measurements": ["portfolio_holding"]}
+    assert p.TIMESERIES == {"measurements": ["portfolio_holding", "portfolio_index"]}
     assert not hasattr(p, "_influx_cfg")
     # No handle bound: nothing is written, whatever the config holds.
     assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is False
@@ -300,10 +363,30 @@ def test_write_holding_leaves_the_owner_tag_to_the_platform(bind_timeseries):
     assert "owner_id" not in ts.lines[0]
 
 
-def test_write_holding_false_on_write_failure_and_records_nothing(bind_timeseries):
-    p, _ = _writing(bind_timeseries, fail_write=RuntimeError("boom"))
+def test_write_holding_false_on_write_failure_and_stores_nothing(bind_timeseries):
+    p, ts = _writing(bind_timeseries, fail_write=RuntimeError("boom"))
     assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is False
-    assert p._recorded == {}
+    assert ts.points == {}
+
+
+def test_collect_writes_the_owners_index(bind_timeseries, monkeypatch):
+    p, ts = _writing(bind_timeseries)
+    result = _collect(
+        p, ts, "alice", {"AAPL": (1700000000, 1.0), "MSFT": None}, monkeypatch
+    )
+    assert result["indexed"] is True
+    (index_line,) = [line for line in ts.lines if line.startswith("portfolio_index")]
+    assert index_line.startswith('portfolio_index,kind=holdings symbols="AAPL,MSFT" ')
+    assert "owner_id" not in index_line
+
+
+def test_index_is_not_written_without_an_owner_or_with_the_sink_off(bind_timeseries):
+    p, ts = _writing(bind_timeseries, owner=None)
+    p.symbols = ["AAPL"]
+    assert asyncio.run(p._write_index()) is False
+    p._owner_id, p.sink_influxdb = "alice", False
+    assert asyncio.run(p._write_index()) is False
+    assert ts.batches == []
 
 
 # ── collect_data (per-owner) / analyze ───────────────────────────────────────

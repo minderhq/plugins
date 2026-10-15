@@ -26,7 +26,7 @@ _WRITERS = {
     "frankfurter": ["fx_rate"],
     "github": ["github_repo"],
     "news": ["news"],
-    "portfolio": ["portfolio_holding"],
+    "portfolio": ["portfolio_holding", "portfolio_index"],
     "tefas_funds": ["tefas_fund_price"],
     "weather": ["weather"],
 }
