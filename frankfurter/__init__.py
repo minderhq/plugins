@@ -23,6 +23,9 @@ _API = "https://api.frankfurter.app"
 
 
 class FrankfurterPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["api.frankfurter.app"]
+
     DISPLAY = {
         "label": "Exchange Rates",
         "summary": "ECB foreign-exchange rates as a time series, plus a convert tool.",

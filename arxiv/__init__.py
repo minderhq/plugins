@@ -41,6 +41,9 @@ def _clamp(value: object, default: int = 5) -> int:
 
 
 class ArxivPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["export.arxiv.org"]
+
     DISPLAY = {
         "label": "arXiv",
         "summary": "Search academic papers on arXiv — a research-lookup tool for the LLM.",

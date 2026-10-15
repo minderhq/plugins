@@ -32,6 +32,10 @@ _SAFE_LANG = re.compile(r"^[a-z]+(-[a-z]+)?\Z")
 
 
 class WikipediaPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration): one
+    # subdomain per configured language.
+    EGRESS = ["*.wikipedia.org"]
+
     DISPLAY = {
         "label": "Wikipedia",
         "summary": "Look up a factual article summary — an ask-Wikipedia tool for the LLM.",

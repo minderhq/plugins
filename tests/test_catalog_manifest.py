@@ -27,6 +27,11 @@ _REQUIRED = (
     "display",
     "runtime",
     "tier",
+    "contract_version",
+    "egress",
+    "manages",
+    "timeseries",
+    "dependencies",
 )
 
 
@@ -49,6 +54,24 @@ def test_every_entry_has_the_required_fields():
         assert e["runtime"] in gen_catalog.RUNTIME_MIN_TIER
         assert e["tier"] in gen_catalog.TIERS
         assert (e["runtime"], e["tier"]) == ("python", "T2")
+
+
+def test_contract_v2_declarations_are_in_the_catalog():
+    by_name = {e["name"]: e for e in gen_catalog.build_catalog()["plugins"]}
+    telegraf, network, webcrawl = (
+        by_name["telegraf"],
+        by_name["network"],
+        by_name["webcrawl"],
+    )
+    assert (telegraf["contract_version"], telegraf["manages"]) == (2, ["telegraf"])
+    assert telegraf["egress"] == []
+    assert (network["contract_version"], network["egress"]) == (2, "lan")
+    assert network["dependencies"] == ["telegraf"]
+    assert (webcrawl["contract_version"], webcrawl["egress"]) == (2, "public")
+    for e in by_name.values():
+        # Every catalog plugin states where it connects.
+        assert e["egress"] is not None, f"{e['name']} declares no EGRESS"
+        assert e["contract_version"] in (1, 2)
 
 
 def test_entries_are_sorted_by_name():

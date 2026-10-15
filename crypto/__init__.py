@@ -62,6 +62,9 @@ _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9._-]+\Z")
 class CryptoPlugin:
     """Backfill + daily-incremental crypto close prices (Yahoo, keyless) into InfluxDB."""
 
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["query1.finance.yahoo.com"]
+
     ACTIONS = frozenset({"refresh", "get_price"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
     # "refresh" stays POST + JWT-gated since it writes to InfluxDB.

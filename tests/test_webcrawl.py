@@ -9,6 +9,8 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from minder_plugin_sdk import CapabilityInvalid, FakePlatformContext
+from minder_plugin_sdk.context import CAP_DOCUMENTS_INDEX
 
 import webcrawl
 from webcrawl import WebCrawlPlugin, _HTMLTextExtractor
@@ -109,16 +111,28 @@ def test_apply_config_maps_all_keys(monkeypatch):
             "WEBCRAWL_MAX_DEPTH": "2",
             "WEBCRAWL_MAX_PAGES": "5",
             "WEBCRAWL_RATE_LIMIT": "0.0",
-            "WEBCRAWL_RAG_URL": "http://rag:8004/",
-            "WEBCRAWL_SERVICE_TOKEN": "tok",
         }
     )
     assert p.kb_id == "kb-9"
     assert p.urls == ["https://x.example"]
     assert p.max_depth == 2
     assert p.max_pages == 5
-    assert p.rag_url == "http://rag:8004"  # trailing slash stripped
-    assert p.service_token == "tok"
+
+
+def test_no_upload_credential_is_configurable():
+    # The plugin holds no upload credential; the platform indexes as the
+    # invoking user (documents.index).
+    keys = {f["key"] for f in WebCrawlPlugin.CONFIG_SCHEMA}
+    assert "WEBCRAWL_SERVICE_TOKEN" not in keys
+    assert "WEBCRAWL_RAG_URL" not in keys
+    assert not any(f.get("secret") for f in WebCrawlPlugin.CONFIG_SCHEMA)
+
+
+def test_declares_contract_v2_public_egress_and_rag():
+    assert WebCrawlPlugin.CONTRACT_VERSION == 2
+    assert WebCrawlPlugin.EGRESS == "public"
+    ctx = FakePlatformContext.for_plugin(WebCrawlPlugin())
+    assert ctx.has(CAP_DOCUMENTS_INDEX)
 
 
 def test_defaults_are_safe():
@@ -389,46 +403,90 @@ def test_ingest_requires_kb_id(monkeypatch):
     assert "WEBCRAWL_KB_ID" in res["error"]
 
 
-def test_ingest_uploads_each_page_and_reports_doc_ids(monkeypatch):
+_PAGE = {"url": "https://a.example/docs/1", "title": "T", "text": "body", "chars": 4}
+
+
+def _ingesting(monkeypatch, pages=(_PAGE,), **ctx_kwargs):
     p = _plugin(monkeypatch)
     p.urls = ["https://a.example/1"]
     p.kb_id = "kb-7"
-    p.service_token = "svc"
-    monkeypatch.setattr(
-        p,
-        "_crawl",
-        _async_return(
-            [{"url": "https://a.example/1", "title": "T", "text": "body", "chars": 4}]
-        ),
-    )
-    fake = _FakeClient(post_resp=_FakeResp(json_data={"document_id": "doc-42"}))
-    monkeypatch.setattr(webcrawl.httpx, "AsyncClient", lambda **k: fake)
+    monkeypatch.setattr(p, "_crawl", _async_return(list(pages)))
+    ctx = FakePlatformContext.for_plugin(p, **ctx_kwargs)
+    p.bind_context(ctx)
+    return p, ctx
+
+
+def test_ingest_indexes_each_page_through_the_platform(monkeypatch):
+    p, ctx = _ingesting(monkeypatch)
     res = asyncio.run(p.ingest())
     assert res["ingested"] == 1
-    assert res["documents"][0]["document_id"] == "doc-42"
-    # verify the handoff hit the real upload endpoint with the service token
-    url, kwargs = fake.posts[0]
-    assert url == "http://minder-rag-pipeline:8004/v1/knowledge-bases/kb-7/upload"
-    assert "file" in kwargs["files"]
-    assert kwargs["headers"]["X-Service-Token"] == "svc"
+    assert res["documents"][0]["document_id"] == "fake-doc-1"
+    assert "error" not in res
+    doc = ctx.indexed[0]
+    assert (doc["kb_id"], doc["filename"], doc["content_type"]) == (
+        "kb-7",
+        "docs_1.txt",
+        "text/plain",
+    )
+    assert doc["content"].startswith(b"# T\nSource: https://a.example/docs/1")
 
 
-def test_ingest_counts_only_successful_uploads(monkeypatch):
+def test_ingest_makes_no_direct_http_upload(monkeypatch):
+    p, _ = _ingesting(monkeypatch)
+
+    def _no_client(**_k):
+        raise AssertionError("ingest must not open its own HTTP client")
+
+    monkeypatch.setattr(webcrawl.httpx, "AsyncClient", _no_client)
+    assert asyncio.run(p.ingest())["ingested"] == 1
+
+
+def test_ingest_without_the_capability_does_not_crawl(monkeypatch):
     p = _plugin(monkeypatch)
     p.urls = ["https://a.example/1"]
     p.kb_id = "kb-7"
-    monkeypatch.setattr(
-        p,
-        "_crawl",
-        _async_return(
-            [{"url": "https://a.example/1", "title": "T", "text": "b", "chars": 1}]
-        ),
-    )
-    fake = _FakeClient(post_exc=RuntimeError("upload boom"))
-    monkeypatch.setattr(webcrawl.httpx, "AsyncClient", lambda **k: fake)
+
+    async def _boom():
+        raise AssertionError("must not crawl")
+
+    monkeypatch.setattr(p, "_crawl", _boom)
+    # Unbound (no platform context): documents.index is not available.
     res = asyncio.run(p.ingest())
     assert res["ingested"] == 0
-    assert res["documents"][0]["document_id"] is None
+    assert "not available" in res["error"]
+
+
+def test_ingest_counts_only_pages_the_platform_accepted(monkeypatch):
+    p, ctx = _ingesting(
+        monkeypatch, pages=(_PAGE, dict(_PAGE, url="https://a.example/2"))
+    )
+    calls = {"n": 0}
+    real_index = ctx.documents.index
+
+    async def _index(kb_id, filename, content, content_type):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise CapabilityInvalid(CAP_DOCUMENTS_INDEX, "rag-pipeline rejected")
+        return await real_index(kb_id, filename, content, content_type)
+
+    monkeypatch.setattr(ctx.documents, "index", _index)
+    res = asyncio.run(p.ingest())
+    assert res["ingested"] == 1
+    assert [d["document_id"] for d in res["documents"]] == [None, "fake-doc-1"]
+
+
+@pytest.mark.parametrize("mode", ["denied", "unavailable"])
+def test_ingest_stops_at_the_first_denied_or_unavailable_call(monkeypatch, mode):
+    p, ctx = _ingesting(monkeypatch, pages=(_PAGE, _PAGE))
+    # has() still says yes (granted at load); the call itself is refused, as
+    # for a background call with no signed-in user.
+    monkeypatch.setattr(ctx, "has", lambda cap: True)
+    getattr(ctx, mode).add(CAP_DOCUMENTS_INDEX)
+    res = asyncio.run(p.ingest())
+    assert res["ingested"] == 0
+    assert res["documents"] == []
+    assert mode in res["error"]
+    assert len(ctx.called(CAP_DOCUMENTS_INDEX)) == 1
 
 
 def test_refresh_calls_collect_data(monkeypatch):

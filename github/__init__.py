@@ -40,6 +40,9 @@ _SAFE_REPO = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\Z")
 
 
 class GitHubPlugin(PluginBase):
+    # Where this plugin connects (contract-v2 EGRESS declaration).
+    EGRESS = ["api.github.com"]
+
     DISPLAY = {
         "label": "GitHub Repos",
         "summary": "Track public repositories' stars/forks/issues over time, plus a stats tool.",

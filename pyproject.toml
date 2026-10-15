@@ -16,12 +16,12 @@ py-modules = []
 [project.optional-dependencies]
 dev = [
     # Pinned past v0.1.0 to a specific commit (not a new tag -- this repo's
-    # own CHANGELOG: no routine version bumps pre-1.0) for the
-    # package-style-plugin validate/inspect fix `network` needs (plugin-sdk#26).
-    # cdc32d2a is that merge as it exists on plugin-sdk `main` today: the same
-    # tree (76b7cd19) as the 66d1ac96 pinned before, which a history rewrite
-    # left reachable from no branch or tag.
-    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk@cdc32d2a96e9129c6c40e410e61741f921b23899",
+    # own CHANGELOG: no routine version bumps pre-1.0). 0861d974 is plugin-sdk
+    # #43 (platform context, contract v2): self.ctx / bind_context, the
+    # CONTRACT_VERSION / MANAGES / EGRESS / TIMESERIES declarations and their
+    # validator rules, FakePlatformContext. It still carries the package-style
+    # plugin validate/inspect fix `network` needs (plugin-sdk#26).
+    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk@0861d974ed16d5ae6f60c5c4a6f5cb875dded374",
     "httpx>=0.27",
     "defusedxml>=0.7",
     "pytest>=8",

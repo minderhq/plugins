@@ -21,7 +21,9 @@ monitored:
     - **telegraf**  → the telegraf plugin's managed region (net_response per port +
                       snmp per SNMP host) so telegraf monitors them → InfluxDB/Grafana.
                       Only when NETWORK_AUTO_APPLY=1 (the safety switch) and only on
-                      change (no reload churn).
+                      change (no reload churn). Sent through the platform context:
+                      ``ctx.plugins.invoke("telegraf", "set_managed_region", ...)``
+                      along the declared ``dependencies=["telegraf"]`` edge.
     - **postgres**  → a `network_inventory` table (ip/hostname/os/ports/snmp/status/
                       first_seen/last_seen) — the structured device inventory. Each
                       cycle reconciles the WHOLE table to the scan (not-live → down)
@@ -34,6 +36,13 @@ monitored:
                       managed region — don't hand-edit those (they're overwritten).
     - **rabbitmq**  → change events (`network.host.new` / `.down` / `.changed`) on the
                       amq.topic exchange, via the management API.
+
+Contract v2: telegraf is reached through ``self.ctx`` (no access to the host's
+internals). The postgres, neo4j and rabbitmq sinks use the backend handles the
+host passes in ``config`` (``database``, ``neo4j``, ``rabbitmq``); a sink whose
+handle is absent reports ``no-database`` / ``no-auth`` and is skipped. A host
+that runs this plugin out of process passes no neo4j / rabbitmq handle, so those
+two sinks stay off there until the platform offers graph / event capabilities.
 
 Uses only deps already in the plugin-registry image (httpx + asyncpg); Neo4j and
 RabbitMQ are reached over HTTP, no extra drivers.
@@ -70,7 +79,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import UNBOUND_CONTEXT, PluginMetadata
+from minder_plugin_sdk.context import CAP_PLUGINS_INVOKE, PlatformContext
 
 from .helpers import (  # noqa: F401 (re-exported for the plugin + its tests)
     _ARP_MAC_OID,
@@ -114,6 +124,14 @@ _SNMP_MAX_CONCURRENCY = 16
 
 class NetworkPlugin:
     """Autonomous nmap+SNMP discovery that fans findings into telegraf/PG/Neo4j/RabbitMQ."""
+
+    # Contract v2: telegraf through self.ctx.plugins.invoke. It scans the LAN
+    # (private addresses), so its egress is "lan".
+    CONTRACT_VERSION = 2
+    EGRESS = "lan"
+
+    # Class-level default so the attribute exists before the host binds one.
+    ctx: PlatformContext = UNBOUND_CONTEXT
 
     ACTIONS = frozenset({"scan", "reconcile"})
 
@@ -196,6 +214,10 @@ class NetworkPlugin:
         self._lock = asyncio.Lock()
         self._task: Optional[asyncio.Task] = None
 
+    def bind_context(self, ctx: PlatformContext) -> None:
+        """Called by the host at load with this plugin's platform context."""
+        self.ctx = ctx
+
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def register(self) -> PluginMetadata:
         return PluginMetadata(
@@ -207,11 +229,9 @@ class NetworkPlugin:
             data_sources=["nmap", "snmp"],
             databases=["postgres", "neo4j", "influxdb", "rabbitmq"],
             # Real runtime dependency, not a backend service: _sink_telegraf
-            # reads plugin_instances["telegraf"] directly to push discovered
-            # hosts into telegraf's managed config region. `databases` above
-            # can't express this (it's for infra services, not sibling
-            # plugins) -- surfaced via the marketplace's plugin-dependency
-            # graph instead (#484).
+            # calls telegraf's set_managed_region through ctx.plugins.invoke,
+            # which the platform allows only along this declared edge. Keep it
+            # a literal list: the platform reads it from the source.
             dependencies=["telegraf"],
         )
 
@@ -605,18 +625,15 @@ class NetworkPlugin:
 
     # ── sinks (each fails soft — a down backend never breaks the cycle) ───────
     async def _sink_telegraf(self, live: List[Dict]) -> Dict:
-        try:
-            from core.state import plugin_instances  # registry-only, lazy
-        except ImportError:
+        if not self.ctx.has(CAP_PLUGINS_INVOKE):
             return {"status": "unavailable"}
-        tg = plugin_instances.get("telegraf")
-        if tg is None:
-            return {"status": "telegraf-not-loaded"}
         cfg = _telegraf_config(live, self.snmp_community, self.tenant_id)
         if cfg == self._applied_cfg:
             return {"status": "unchanged"}
         try:
-            await tg.set_managed_region(cfg, reload=True)
+            await self.ctx.plugins.invoke(
+                "telegraf", "set_managed_region", body=cfg, reload=True
+            )
             self._applied_cfg = cfg
             return {"status": "applied", "bytes": len(cfg)}
         except (
@@ -749,11 +766,14 @@ class NetworkPlugin:
             await conn.close()
 
     async def _sink_neo4j(self, live: List[Dict]) -> Dict:
-        auth = os.environ.get("NEO4J_AUTH", "")
-        if "/" not in auth:
+        # The handle the host passes (never the platform credential from the
+        # process env). No handle -> skip.
+        neo = self.config.get("neo4j") or {}
+        user, pw = neo.get("user"), neo.get("password")
+        if not user or not pw:
             return {"status": "no-auth"}
-        user, pw = auth.split("/", 1)
-        url = os.environ.get("NEO4J_HTTP", "http://neo4j:7474") + "/db/neo4j/tx/commit"
+        base = neo.get("url") or os.environ.get("NEO4J_HTTP", "http://neo4j:7474")
+        url = str(base).rstrip("/") + "/db/neo4j/tx/commit"
         payload = [
             {
                 "host": h.get("host", ""),
@@ -853,10 +873,16 @@ class NetworkPlugin:
         ]
         if not events:
             return {"status": "no-events"}
-        user = os.environ.get("NETWORK_RABBITMQ_USER", "minder")
-        pw = os.environ.get("RABBITMQ_PASSWORD", "")
-        base = os.environ.get("NETWORK_RABBITMQ_URL", "http://rabbitmq:15672")
-        url = base + "/api/exchanges/%2f/amq.topic/publish"
+        # The handle the host passes (never the platform credential from the
+        # process env). No handle -> skip.
+        mq = self.config.get("rabbitmq") or {}
+        user, pw = mq.get("user"), mq.get("password")
+        if not user or not pw:
+            return {"status": "no-auth"}
+        base = mq.get("url") or os.environ.get(
+            "NETWORK_RABBITMQ_URL", "http://rabbitmq:15672"
+        )
+        url = str(base).rstrip("/") + "/api/exchanges/%2f/amq.topic/publish"
         sent = 0  # accepted by the exchange (HTTP 200)
         routed = 0  # actually delivered to a bound queue (a consumer exists)
         errors = 0  # HTTP-level failures

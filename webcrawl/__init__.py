@@ -7,10 +7,15 @@ source that needs **no OAuth / no credential decision**: the public web.
 Given a configured list of seed URLs (and an optional shallow, same-domain crawl
 depth), it fetches each page, extracts readable text (stdlib ``html.parser`` — no
 new dependency, no XML/sitemap parsing), and hands that content to Minder's
-**existing** rag ingestion API (``POST /v1/knowledge-bases/{kb_id}/upload``) — the
-exact same upload path a manual file drop takes. No bespoke ingestion code: a
-connector's whole job is fetch → normalize-to-text → hand off to the pipeline every
-other upload already flows through.
+**existing** rag ingestion path through the platform context
+(``self.ctx.documents.index``) — the same upload a manual file drop takes. No
+bespoke ingestion code: a connector's whole job is fetch → normalize-to-text →
+hand off to the pipeline every other upload already flows through.
+
+Contract v2: the plugin holds no credential for the upload. The platform indexes
+each page on behalf of the user who invoked ``ingest`` (their tenant and their
+access to the knowledge base), so ``ingest`` needs a signed-in caller; the
+hourly preview never uploads.
 
 This is deliberately the *public-web* connector only. The OAuth sources named in
  #1499 (Notion / Confluence / Google Drive / Slack) each need a per-plugin secrets /
@@ -42,13 +47,13 @@ SECURITY (this fetches arbitrary configured URLs):
     fetched HTML are followed (no sitemap/XML parsing at all, so no XXE surface).
 
 Uses only deps already in the plugin-registry image (``httpx`` + the stdlib).
+Uploads go through ``self.ctx.documents.index`` (capability ``documents.index``,
+granted because ``REQUIRES`` names the ``rag`` bundle).
 
 Config (GET/PUT /v1/plugins/webcrawl/config — all API-editable, no restart):
   WEBCRAWL_KB_ID          target knowledge base id (required to ingest).
   WEBCRAWL_URLS           seed URLs, comma-separated. Each must be http(s) and
                           resolve to a public address (non-conforming are skipped).
-  WEBCRAWL_RAG_URL        rag-pipeline base URL (default the in-cluster service).
-  WEBCRAWL_SERVICE_TOKEN  X-Service-Token for the internal upload call (secret).
   WEBCRAWL_MAX_DEPTH      shallow same-domain crawl depth (0 = only the seeds).
   WEBCRAWL_MAX_PAGES      hard cap on total pages fetched per run.
   WEBCRAWL_MAX_BYTES      per-page download/processing cap (bytes).
@@ -68,7 +73,14 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from minder_plugin_sdk import PluginMetadata
+from minder_plugin_sdk import (
+    UNBOUND_CONTEXT,
+    CapabilityDenied,
+    CapabilityInvalid,
+    CapabilityUnavailable,
+    PluginMetadata,
+)
+from minder_plugin_sdk.context import CAP_DOCUMENTS_INDEX, PlatformContext
 
 __all__ = ["WebCrawlPlugin"]
 
@@ -202,8 +214,15 @@ class WebCrawlPlugin:
         "category": "connector",
     }
 
-    # Needs the rag bundle (its rag-pipeline is the upload target). No storage
-    # backend is written directly — ingestion goes through the HTTP upload API.
+    # Contract v2: uploads go through self.ctx.documents.index. EGRESS is the
+    # public web (the seeds are operator-configured URLs; the SSRF guard below
+    # still refuses non-public addresses).
+    CONTRACT_VERSION = 2
+    EGRESS = "public"
+
+    # Needs the rag bundle (its rag-pipeline is the upload target, reached by the
+    # platform; the plugin writes no storage backend directly). Also what grants
+    # documents.index.
     REQUIRES: Dict[str, List[str]] = {
         "services": [],
         "optional_services": [],
@@ -215,7 +234,8 @@ class WebCrawlPlugin:
     ACTIONS = frozenset({"ingest", "refresh"})
     READ_ONLY_ACTIONS = frozenset({"refresh"})
 
-    _DEFAULT_RAG_URL = "http://minder-rag-pipeline:8004"
+    # Class-level default so the attribute exists before the host binds one.
+    ctx: PlatformContext = UNBOUND_CONTEXT
 
     CONFIG_SCHEMA = [
         {
@@ -275,27 +295,6 @@ class WebCrawlPlugin:
             "step": 0.1,
             "group": "Crawl bounds",
         },
-        {
-            "key": "WEBCRAWL_RAG_URL",
-            "type": "string",
-            "default": _DEFAULT_RAG_URL,
-            "description": "rag-pipeline base URL the upload call targets.",
-            "widget": "text",
-            "group": "Target",
-        },
-        {
-            "key": "WEBCRAWL_SERVICE_TOKEN",
-            "type": "string",
-            "default": "",
-            "description": (
-                "X-Service-Token for the internal upload call (matches "
-                "rag-pipeline's SERVICE_SYNC_TOKEN). Leave blank if the upload "
-                "endpoint is reached with a user JWT instead."
-            ),
-            "secret": True,
-            "widget": "secret",
-            "group": "Target",
-        },
     ]
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -314,12 +313,12 @@ class WebCrawlPlugin:
                 "WEBCRAWL_MAX_PAGES": os.environ.get("WEBCRAWL_MAX_PAGES", "20"),
                 "WEBCRAWL_MAX_BYTES": os.environ.get("WEBCRAWL_MAX_BYTES", "2000000"),
                 "WEBCRAWL_RATE_LIMIT": os.environ.get("WEBCRAWL_RATE_LIMIT", "1.0"),
-                "WEBCRAWL_RAG_URL": os.environ.get(
-                    "WEBCRAWL_RAG_URL", self._DEFAULT_RAG_URL
-                ),
-                "WEBCRAWL_SERVICE_TOKEN": os.environ.get("WEBCRAWL_SERVICE_TOKEN", ""),
             }
         )
+
+    def bind_context(self, ctx: PlatformContext) -> None:
+        """Called by the host at load with this plugin's platform context."""
+        self.ctx = ctx
 
     # ── config ────────────────────────────────────────────────────────────────
     def apply_config(self, cfg: Dict[str, Any]) -> None:
@@ -340,12 +339,6 @@ class WebCrawlPlugin:
             )
         if "WEBCRAWL_RATE_LIMIT" in cfg:
             self.rate_limit = self._coerce_float(cfg["WEBCRAWL_RATE_LIMIT"], 1.0)
-        if "WEBCRAWL_RAG_URL" in cfg:
-            self.rag_url = str(cfg["WEBCRAWL_RAG_URL"] or self._DEFAULT_RAG_URL).rstrip(
-                "/"
-            )
-        if "WEBCRAWL_SERVICE_TOKEN" in cfg:
-            self.service_token = str(cfg["WEBCRAWL_SERVICE_TOKEN"] or "")
 
     @staticmethod
     def _parse_urls(spec: str) -> List[str]:
@@ -498,34 +491,23 @@ class WebCrawlPlugin:
         return results
 
     # ── ingestion handoff (the connector → existing rag upload API) ────────────
-    async def _upload(
-        self, client: httpx.AsyncClient, page: Dict[str, Any]
-    ) -> Optional[str]:
-        """Hand one extracted page to the KB via the existing upload endpoint
-        (``POST /v1/knowledge-bases/{kb_id}/upload``, multipart). Auth is the
-        internal X-Service-Token (rag-pipeline's SERVICE_SYNC_TOKEN) when set.
-        Returns the created ``document_id`` or None on failure."""
+    async def _upload(self, page: Dict[str, Any]) -> Optional[str]:
+        """Hand one extracted page to the KB through the platform
+        (``ctx.documents.index``), which uploads it as the invoking user.
+        Returns the created ``document_id``, or None when the platform rejected
+        this one page. Raises CapabilityDenied / CapabilityUnavailable when no
+        page can be indexed (no grant, no signed-in caller, platform down)."""
         # Filename is metadata only — the extractor registry sniffs real content,
         # not the extension — but a .txt name + text/plain matches the TXT extractor.
         slug = urlsplit(page["url"]).path.strip("/").replace("/", "_") or "index"
         filename = f"{slug[:80]}.txt"
         body = f"# {page['title']}\nSource: {page['url']}\n\n{page['text']}"
-        headers = {}
-        if self.service_token:
-            headers["X-Service-Token"] = self.service_token
-        url = f"{self.rag_url}/v1/knowledge-bases/{self.kb_id}/upload"
         try:
-            resp = await client.post(
-                url,
-                files={"file": (filename, body.encode("utf-8"), "text/plain")},
-                headers=headers,
+            data = await self.ctx.documents.index(
+                self.kb_id, filename, body.encode("utf-8"), "text/plain"
             )
-            resp.raise_for_status()
-            data = resp.json() if resp.content else {}
-        except Exception as e:
-            logger.warning(
-                f"⚠️ webcrawl upload failed for {page['url']}: {type(e).__name__}"
-            )
+        except CapabilityInvalid as e:
+            logger.warning(f"⚠️ webcrawl upload rejected for {page['url']}: {e.reason}")
             return None
         doc_id = data.get("document_id") if isinstance(data, dict) else None
         return str(doc_id) if doc_id else None
@@ -573,29 +555,42 @@ class WebCrawlPlugin:
             return {"error": "WEBCRAWL_KB_ID is not configured", "ingested": 0}
         if not self.urls:
             return {"error": "no seed URLs configured", "ingested": 0}
+        if not self.ctx.has(CAP_DOCUMENTS_INDEX):
+            return {
+                "error": "document indexing is not available to this plugin",
+                "ingested": 0,
+            }
         pages = await self._crawl()
         documents: List[Dict[str, Any]] = []
         ingested = 0
-        async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-            for page in pages:
-                doc_id = await self._upload(client, page)
-                documents.append(
-                    {
-                        "url": page["url"],
-                        "title": page["title"],
-                        "chars": page["chars"],
-                        "document_id": doc_id,
-                    }
-                )
-                if doc_id:
-                    ingested += 1
-        result = {
+        error: Optional[str] = None
+        for page in pages:
+            try:
+                doc_id = await self._upload(page)
+            except (CapabilityDenied, CapabilityUnavailable) as e:
+                # Every further page would fail the same way: stop here.
+                logger.warning(f"⚠️ webcrawl ingest stopped: {e}")
+                error = str(e)
+                break
+            documents.append(
+                {
+                    "url": page["url"],
+                    "title": page["title"],
+                    "chars": page["chars"],
+                    "document_id": doc_id,
+                }
+            )
+            if doc_id:
+                ingested += 1
+        result: Dict[str, Any] = {
             "kb_id": self.kb_id,
             "pages_crawled": len(pages),
             "ingested": ingested,
             "documents": documents,
             "ingested_at": datetime.now(timezone.utc).isoformat(),
         }
+        if error:
+            result["error"] = error
         logger.info(
             f"🕸️ webcrawl ingest: {ingested}/{len(pages)} page(s) → KB {self.kb_id}"
         )
