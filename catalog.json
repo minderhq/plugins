@@ -880,7 +880,9 @@
           "WEBCRAWL_MAX_BYTES": {
             "type": "integer",
             "default": 2000000,
-            "description": "Per-page download/processing cap in bytes."
+            "description": "Per-page download/processing cap in bytes (at most just under 10 MiB, the knowledge-base document limit).",
+            "minimum": 1000,
+            "maximum": 10420224
           },
           "WEBCRAWL_RATE_LIMIT": {
             "type": "number",

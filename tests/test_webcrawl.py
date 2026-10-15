@@ -500,3 +500,19 @@ def _async_return(value):
         return value
 
     return _f
+
+
+def test_max_bytes_is_clamped_below_the_document_cap(monkeypatch):
+    p = _plugin(monkeypatch)
+    p.apply_config({"WEBCRAWL_MAX_BYTES": "50000000"})
+    assert p.max_bytes == webcrawl._MAX_PAGE_BYTES < webcrawl._DOCUMENT_MAX_BYTES
+
+
+def test_an_oversized_page_is_cut_to_the_document_cap_not_dropped(monkeypatch):
+    big = dict(_PAGE, text="é" * (6 * 1024 * 1024))  # 12 MiB of UTF-8
+    p, ctx = _ingesting(monkeypatch, pages=(big,))
+    res = asyncio.run(p.ingest())
+    assert res["ingested"] == 1
+    content = ctx.indexed[0]["content"]
+    assert len(content) <= webcrawl._DOCUMENT_MAX_BYTES
+    content.decode("utf-8")  # still valid UTF-8 (no split character)

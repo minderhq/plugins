@@ -24,7 +24,11 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from minder_plugin_sdk import CapabilityDenied, FakePlatformContext
+from minder_plugin_sdk import (
+    CapabilityDenied,
+    CapabilityUnavailable,
+    FakePlatformContext,
+)
 from minder_plugin_sdk.context import CAP_PLUGINS_INVOKE
 
 from network import NetworkPlugin, _telegraf_config
@@ -153,6 +157,43 @@ async def test_sink_telegraf_reports_a_refused_call_as_an_error():
     result = await pl._sink_telegraf([_LIVE_HOST])
 
     assert result == {"status": "error", "error": "CapabilityDenied"}
+
+
+@pytest.mark.asyncio
+async def test_sink_telegraf_reports_not_loaded_when_telegraf_is_unavailable():
+    async def unavailable(**_kwargs):
+        raise CapabilityUnavailable(
+            CAP_PLUGINS_INVOKE, "plugin 'telegraf' is not running"
+        )
+
+    pl, _, _ = _bound(unavailable)
+
+    assert await pl._sink_telegraf([_LIVE_HOST]) == {"status": "telegraf-not-loaded"}
+    assert pl._applied_cfg == ""
+
+
+@pytest.mark.asyncio
+async def test_sink_telegraf_reports_a_truncated_region():
+    hosts = [
+        {
+            "host": f"10.0.0.{i}",
+            "state": "up",
+            "ports": [{"port": p, "protocol": "tcp"} for p in range(1, 9)],
+            "snmp": {"system": {}},
+        }
+        for i in range(256)
+    ]
+    pl, _, calls = _bound()
+
+    result = await pl._sink_telegraf(hosts)
+
+    assert result["status"] == "truncated"
+    assert result["hosts_dropped"] > 0
+    assert len(calls[0]["body"].encode("utf-8")) <= 64 * 1024
+    # Same scan again: nothing to rewrite, but the truncation stays visible.
+    again = await pl._sink_telegraf(hosts)
+    assert again["status"] == "unchanged"
+    assert again["hosts_dropped"] == result["hosts_dropped"]
 
 
 def test_network_declares_the_telegraf_edge_and_lan_egress():

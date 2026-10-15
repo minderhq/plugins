@@ -88,6 +88,12 @@ logger = logging.getLogger("minder.plugin.webcrawl")
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
+# documents.index refuses a document over 10 MiB. A page is capped below that,
+# leaving room for the "# title / Source:" header added before upload, and the
+# uploaded body is cut to the cap as a last resort, so no page is refused for size.
+_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024
+_MAX_PAGE_BYTES = _DOCUMENT_MAX_BYTES - 64 * 1024
+
 
 # ── SSRF guard (module-level so it is independently testable / stubbable) ─────
 def _is_public_address(raw: str) -> bool:
@@ -282,8 +288,13 @@ class WebCrawlPlugin:
             "key": "WEBCRAWL_MAX_BYTES",
             "type": "int",
             "default": 2_000_000,
-            "description": "Per-page download/processing cap in bytes.",
+            "description": (
+                "Per-page download/processing cap in bytes (at most just under "
+                "10 MiB, the knowledge-base document limit)."
+            ),
             "widget": "number",
+            "min": 1_000,
+            "max": _MAX_PAGE_BYTES,
             "group": "Crawl bounds",
         },
         {
@@ -335,7 +346,7 @@ class WebCrawlPlugin:
             )
         if "WEBCRAWL_MAX_BYTES" in cfg:
             self.max_bytes = self._coerce_int(
-                cfg["WEBCRAWL_MAX_BYTES"], 2_000_000, lo=1_000, hi=50_000_000
+                cfg["WEBCRAWL_MAX_BYTES"], 2_000_000, lo=1_000, hi=_MAX_PAGE_BYTES
             )
         if "WEBCRAWL_RATE_LIMIT" in cfg:
             self.rate_limit = self._coerce_float(cfg["WEBCRAWL_RATE_LIMIT"], 1.0)
@@ -502,9 +513,14 @@ class WebCrawlPlugin:
         slug = urlsplit(page["url"]).path.strip("/").replace("/", "_") or "index"
         filename = f"{slug[:80]}.txt"
         body = f"# {page['title']}\nSource: {page['url']}\n\n{page['text']}"
+        content = body.encode("utf-8")
+        if len(content) > _DOCUMENT_MAX_BYTES:
+            content = (
+                content[:_DOCUMENT_MAX_BYTES].decode("utf-8", "ignore").encode("utf-8")
+            )
         try:
             data = await self.ctx.documents.index(
-                self.kb_id, filename, body.encode("utf-8"), "text/plain"
+                self.kb_id, filename, content, "text/plain"
             )
         except CapabilityInvalid as e:
             logger.warning(f"⚠️ webcrawl upload rejected for {page['url']}: {e.reason}")

@@ -79,7 +79,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import httpx
-from minder_plugin_sdk import UNBOUND_CONTEXT, PluginMetadata
+from minder_plugin_sdk import UNBOUND_CONTEXT, CapabilityUnavailable, PluginMetadata
 from minder_plugin_sdk.context import CAP_PLUGINS_INVOKE, PlatformContext
 
 from .helpers import (  # noqa: F401 (re-exported for the plugin + its tests)
@@ -108,6 +108,7 @@ from .helpers import (  # noqa: F401 (re-exported for the plugin + its tests)
     _parse_snmpwalk,
     _summarize,
     _telegraf_config,
+    _telegraf_region,
 )
 
 __all__ = ["NetworkPlugin"]
@@ -253,7 +254,7 @@ class NetworkPlugin:
                 errs = {
                     k: v
                     for k, v in result.get("sinks", {}).items()
-                    if v.get("status") in ("error", "partial")
+                    if v.get("status") in ("error", "partial", "truncated")
                 }
                 if errs:
                     logger.warning("network reconcile sink issues: %s", errs)
@@ -627,20 +628,33 @@ class NetworkPlugin:
     async def _sink_telegraf(self, live: List[Dict]) -> Dict:
         if not self.ctx.has(CAP_PLUGINS_INVOKE):
             return {"status": "unavailable"}
-        cfg = _telegraf_config(live, self.snmp_community, self.tenant_id)
+        # Trimmed to the platform's region limits: a larger region would be
+        # refused whole, on every cycle.
+        cfg, dropped = _telegraf_region(live, self.snmp_community, self.tenant_id)
+        truncated = {"hosts_dropped": dropped} if dropped else {}
         if cfg == self._applied_cfg:
-            return {"status": "unchanged"}
+            return {"status": "unchanged", **truncated}
         try:
             await self.ctx.plugins.invoke(
                 "telegraf", "set_managed_region", body=cfg, reload=True
             )
-            self._applied_cfg = cfg
-            return {"status": "applied", "bytes": len(cfg)}
+        except CapabilityUnavailable:
+            # The telegraf plugin is not running (or the platform can't reach it).
+            return {"status": "telegraf-not-loaded"}
         except (
             Exception
         ) as e:  # log AND return the TYPE only -- the message may carry creds
             logger.warning("network telegraf sink failed: %s", type(e).__name__)
             return {"status": "error", "error": type(e).__name__}
+        self._applied_cfg = cfg
+        if dropped:
+            logger.warning(
+                "network telegraf region truncated: %d host(s) left unmonitored "
+                "(the managed region is size-capped)",
+                dropped,
+            )
+            return {"status": "truncated", "bytes": len(cfg), **truncated}
+        return {"status": "applied", "bytes": len(cfg)}
 
     async def _sink_postgres(self, live: List[Dict], changes: Dict) -> Dict:
         try:

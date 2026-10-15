@@ -7,7 +7,8 @@ match their long-standing use as network-plugin internals.
 """
 
 import ipaddress
-from typing import Dict, List
+import json
+from typing import Dict, List, Tuple
 import defusedxml.ElementTree as ElementTree
 
 # ── SNMP OID constants ────────────────────────────────────────────────────────
@@ -143,6 +144,106 @@ def _parse_arp(raw: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+# The platform's limits on a telegraf managed region (it refuses a larger one
+# outright), with headroom: the region text in UTF-8 bytes and the number of
+# TOML tables in it.
+_REGION_MAX_BYTES = 60 * 1024
+_REGION_MAX_TABLES = 480
+
+
+def _toml_str(value: object) -> str:
+    """A TOML basic string for ``value``. JSON string escaping is valid TOML
+    (quotes, backslashes and control characters, incl. newlines, are escaped),
+    so a scanned address, tenant id or community can never close the string or
+    add keys/tables to the region."""
+    return json.dumps(str(value))
+
+
+def _host_blocks(h: Dict, snmp_community: str, tenant_id: str) -> List[Tuple[str, int]]:
+    """``[(toml_block, table_count)]`` for one host: a net_response input per
+    open TCP port and an snmp input when the host answered SNMP."""
+    addr = str(h.get("host", ""))
+    tenant = _toml_str(tenant_id)
+
+    def tags(kind: str) -> str:
+        return f"  [inputs.{kind}.tags]\n    tenant_id = {tenant}"
+
+    out: List[Tuple[str, int]] = []
+    for p in h.get("ports", []):
+        if p.get("protocol", "tcp") != "tcp":
+            continue
+        address = f"{addr}:{p['port']}"
+        out.append(
+            (
+                "[[inputs.net_response]]\n"
+                '  protocol = "tcp"\n'
+                f"  address = {_toml_str(address)}\n"
+                '  timeout = "5s"\n' + tags("net_response"),
+                2,  # the input table + its tags table
+            )
+        )
+    if h.get("snmp"):
+        agent = f"udp://{addr}:161"
+        fields = "\n".join(
+            "  [[inputs.snmp.field]]\n"
+            f"    name = {_toml_str(name)}\n"
+            f"    oid = {_toml_str(oid)}"
+            for name, oid in _SNMP_SYSTEM_OIDS.items()
+        )
+        out.append(
+            (
+                "[[inputs.snmp]]\n"
+                f"  agents = [{_toml_str(agent)}]\n"
+                "  version = 2\n"
+                f"  community = {_toml_str(snmp_community)}\n"
+                + tags("snmp")
+                + "\n"
+                + fields,
+                2 + len(_SNMP_SYSTEM_OIDS),  # input + tags + one per field
+            )
+        )
+    return out
+
+
+def _telegraf_region(
+    hosts: List[Dict],
+    snmp_community: str,
+    tenant_id: str = "",
+    max_bytes: int = _REGION_MAX_BYTES,
+    max_tables: int = _REGION_MAX_TABLES,
+) -> Tuple[str, int]:
+    """``(region, hosts_dropped)``: the telegraf inputs for ``hosts`` (see
+    :func:`_telegraf_config`), trimmed to fit the platform's region limits.
+
+    Hosts are taken whole, in address order, until the next one would exceed
+    ``max_bytes`` or ``max_tables``; the rest are dropped (and counted), so a
+    large scan still monitors a stable subset instead of being refused whole."""
+
+    def _key(h: Dict) -> Tuple[int, int, str]:
+        host = str(h.get("host", ""))
+        try:
+            ip = ipaddress.ip_address(host)
+            return (0, ip.version * 2**128 + int(ip), "")
+        except ValueError:
+            return (1, 0, host)
+
+    blocks: List[str] = []
+    size, tables, dropped = 0, 0, 0
+    for h in sorted(hosts, key=_key):
+        host_blocks = _host_blocks(h, snmp_community, tenant_id)
+        if not host_blocks:
+            continue
+        add_bytes = sum(len(b.encode("utf-8")) + 1 for b, _ in host_blocks)
+        add_tables = sum(t for _, t in host_blocks)
+        if dropped or size + add_bytes > max_bytes or tables + add_tables > max_tables:
+            dropped += 1
+            continue
+        blocks.extend(b for b, _ in host_blocks)
+        size += add_bytes
+        tables += add_tables
+    return "\n".join(blocks), dropped
+
+
 def _telegraf_config(
     hosts: List[Dict], snmp_community: str, tenant_id: str = ""
 ) -> str:
@@ -154,38 +255,12 @@ def _telegraf_config(
     LAN-scan data is private infra data, not a public series, and must stay
     per-tenant queryable/isolated in InfluxDB.
 
-    NOTE: consumed by the telegraf plugin's set_managed_region(), which validates it
-    as TOML — keep the output valid TOML (see ../telegraf)."""
-    tag_block = f'  [inputs.{{input}}.tags]\n    tenant_id = "{tenant_id}"'
-    blocks: List[str] = []
-    for h in hosts:
-        addr = h.get("host", "")
-        for p in h.get("ports", []):
-            if p.get("protocol", "tcp") != "tcp":
-                continue
-            blocks.append(
-                "[[inputs.net_response]]\n"
-                '  protocol = "tcp"\n'
-                f'  address = "{addr}:{p["port"]}"\n'
-                '  timeout = "5s"\n' + tag_block.format(input="net_response")
-            )
-        if h.get("snmp"):
-            fields = "\n".join(
-                "  [[inputs.snmp.field]]\n"
-                f'    name = "{name}"\n'
-                f'    oid = "{oid}"'
-                for name, oid in _SNMP_SYSTEM_OIDS.items()
-            )
-            blocks.append(
-                "[[inputs.snmp]]\n"
-                f'  agents = ["udp://{addr}:161"]\n'
-                "  version = 2\n"
-                f'  community = "{snmp_community}"\n'
-                + tag_block.format(input="snmp")
-                + "\n"
-                + fields
-            )
-    return "\n".join(blocks)
+    Every value is a TOML basic string (:func:`_toml_str`), and the region is
+    trimmed to the platform's limits (:func:`_telegraf_region`).
+
+    NOTE: consumed by the telegraf plugin's set_managed_region(), which the
+    platform validates as TOML — keep the output valid TOML (see ../telegraf)."""
+    return _telegraf_region(hosts, snmp_community, tenant_id)[0]
 
 
 def _summarize(hosts: List[Dict]) -> Dict[str, Dict]:

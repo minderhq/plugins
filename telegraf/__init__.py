@@ -27,7 +27,7 @@ discovered targets into this plugin's managed region through
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from minder_plugin_sdk import UNBOUND_CONTEXT, CapabilityInvalid, PluginMetadata
 from minder_plugin_sdk.context import (
@@ -52,12 +52,14 @@ class TelegrafPlugin:
     # Methods invokable via POST /v1/plugins/telegraf/actions/<name> (JWT-gated).
     # Whitelist only — nothing else on the instance is reachable over HTTP.
     ACTIONS = frozenset({"set_managed_region", "clear_managed_region", "reload"})
-    # Admin-only subset: these two rewrite telegraf's live config. The platform
-    # validates the content (allowlisted input types only, so e.g. inputs.exec
-    # is refused), but changing what telegraf monitors stays an admin
-    # decision. `reload` alone is a no-op unless `force_restart=True`, and even
-    # then only restarts a container.
-    ADMIN_ONLY_ACTIONS = frozenset({"set_managed_region", "clear_managed_region"})
+    # All three are admin-only. The first two rewrite telegraf's live config:
+    # the platform validates the content (allowlisted input types only, so e.g.
+    # inputs.exec is refused), but changing what telegraf monitors stays an
+    # admin decision. `reload(force_restart=True)` restarts the telegraf
+    # container, which no ordinary user may trigger.
+    ADMIN_ONLY_ACTIONS = frozenset(
+        {"set_managed_region", "clear_managed_region", "reload"}
+    )
 
     # Class-level default so the attribute exists before the host binds one.
     ctx: PlatformContext = UNBOUND_CONTEXT
@@ -140,9 +142,27 @@ class TelegrafPlugin:
         if not isinstance(body, str):
             raise ValueError("managed region body must be a string")
         body = body.strip("\n")
+        if not body:
+            return await self.clear_managed_region(reload=reload)
+        return await self._write_region(
+            body, lambda: self.ctx.telegraf.set_managed_region(body), reload
+        )
+
+    async def clear_managed_region(self, reload: bool = True) -> Dict:
+        """Empty the managed region."""
+        return await self._write_region(
+            "", self.ctx.telegraf.clear_managed_region, reload
+        )
+
+    async def _write_region(
+        self,
+        body: str,
+        write: Callable[[], Awaitable[Dict]],
+        reload: bool,
+    ) -> Dict:
         async with self._lock:
             try:
-                written = await self.ctx.telegraf.set_managed_region(body)
+                written = await write()
             except CapabilityInvalid as e:
                 raise ValueError(str(e)) from None
             self._region = body
@@ -160,9 +180,6 @@ class TelegrafPlugin:
             self._last_write["inputs"],
         )
         return result
-
-    async def clear_managed_region(self, reload: bool = True) -> Dict:
-        return await self.set_managed_region("", reload=reload)
 
     # ── reload: watch-config (happy path) + restart fallback ──────────────────
     async def reload(self, force_restart: bool = False) -> Dict:

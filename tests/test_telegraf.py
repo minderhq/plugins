@@ -16,6 +16,7 @@ from minder_plugin_sdk import (
     declaration_errors,
 )
 from minder_plugin_sdk.context import (
+    CAP_TELEGRAF_CLEAR_MANAGED_REGION,
     CAP_TELEGRAF_RELOAD,
     CAP_TELEGRAF_SET_MANAGED_REGION,
 )
@@ -112,12 +113,21 @@ def test_denied_and_unavailable_propagate():
         asyncio.run(TelegrafPlugin({}).set_managed_region(_REGION, reload=False))
 
 
-def test_clear_writes_an_empty_region():
+def test_clear_uses_the_clear_capability():
     pl, ctx = _bound()
     asyncio.run(pl.set_managed_region(_REGION, reload=False))
     asyncio.run(pl.clear_managed_region(reload=False))
     assert ctx.telegraf_region == ""
     assert pl.list_managed_inputs() == []
+    assert len(ctx.called(CAP_TELEGRAF_CLEAR_MANAGED_REGION)) == 1
+    assert len(ctx.called(CAP_TELEGRAF_SET_MANAGED_REGION)) == 1  # only the set
+
+
+def test_setting_an_empty_region_clears_it():
+    pl, ctx = _bound()
+    asyncio.run(pl.set_managed_region("\n\n", reload=False))
+    assert ctx.called(CAP_TELEGRAF_CLEAR_MANAGED_REGION)
+    assert not ctx.called(CAP_TELEGRAF_SET_MANAGED_REGION)
 
 
 def test_reload_default_and_forced():
@@ -156,7 +166,13 @@ def test_actions_whitelist_is_read_only_safe():
         assert callable(getattr(pl, name))
 
 
-def test_config_writing_actions_are_admin_only():
+def test_every_action_is_admin_only():
+    # Writing the region changes what telegraf monitors, and reload can force a
+    # container restart: none of it is for an ordinary signed-in user.
     pl = TelegrafPlugin({})
-    assert pl.ADMIN_ONLY_ACTIONS == {"set_managed_region", "clear_managed_region"}
-    assert pl.ADMIN_ONLY_ACTIONS <= pl.ACTIONS
+    assert pl.ADMIN_ONLY_ACTIONS == {
+        "set_managed_region",
+        "clear_managed_region",
+        "reload",
+    }
+    assert pl.ADMIN_ONLY_ACTIONS == pl.ACTIONS
