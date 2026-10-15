@@ -670,7 +670,8 @@
       ],
       "manages": [],
       "timeseries": [
-        "portfolio_holding"
+        "portfolio_holding",
+        "portfolio_index"
       ],
       "dependencies": []
     },

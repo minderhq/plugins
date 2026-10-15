@@ -32,12 +32,19 @@ plugin holds no InfluxDB address or token, and it does not tag the owner itself:
 the platform forces the ``owner_id`` tag to the owner it is collecting for, so a
 point can never land under another user's (or the shared) owner.
 
+Each per-owner collection also writes one ``portfolio_index`` point (tag
+``kind=holdings``, string field ``symbols``): the symbols that owner tracks.
+
 Exposes a single owner-scoped read-back action (#1035): ``get_value`` (AI tool
 ``get_portfolio_value``) returns the latest recorded price for each symbol THIS
-user tracks: the last point this instance wrote for that owner (the platform's
-time-series read returns timestamps, not values, so the plugin keeps that last
-point per owner in memory; it is refilled by the next scheduled collection after
-a restart). It is a
+user tracks, read from the store through the handle's
+``latest(measurement, tag_key, tag_value, fields=[...])``: first the owner's
+newest ``portfolio_index`` point (which symbols), then each symbol's newest
+``portfolio_holding`` point (its price). The platform scopes both reads to the
+owner it runs the action for, so the answer survives a restart and never mixes
+owners. ``as_of`` is the store's timestamp (``2021-01-02T00:00:00``: UTC, no
+offset suffix). An owner's ``get_value`` is empty until their first collection
+writes the index. At most ``MAX_SYMBOLS`` symbols are tracked per owner. It is a
 PRIVATE_PER_USER action, so plugin-registry's action dispatch
 (``routes/plugins.py``) injects the AUTHENTICATED caller's own ``owner_id`` from
 the JWT — never caller-supplied — so a user can only ever read their own
@@ -47,6 +54,7 @@ plugin config-only. The scheduled per-owner collection (above) remains the write
 path; ``get_value`` is the read path over the same private series.
 """
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -62,6 +70,21 @@ logger = logging.getLogger("minder.plugin.portfolio")
 
 _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
 _MEASUREMENT = "portfolio_holding"
+# One point per owner per collection: which symbols that owner tracks, so
+# get_value knows what to read back (an action does not run under the owner's
+# config).
+_INDEX_MEASUREMENT = "portfolio_index"
+_INDEX_TAG = ("kind", "holdings")
+# At most this many symbols per owner: bounds a collection's writes and
+# get_value's reads (one store read per symbol).
+MAX_SYMBOLS = 50
+# get_value's per-symbol reads in flight at once.
+_READ_CONCURRENCY = 8
+# Error type names the platform's time-series handle raises for a refused or
+# rejected call (in process and through a runner); anything else is treated
+# as the store being unavailable.
+_REFUSED_ERRORS = frozenset({"TimeseriesDenied", "CapabilityDenied"})
+_REJECTED_ERRORS = frozenset({"TimeseriesInvalid", "CapabilityInvalid"})
 
 # Same charset guard as crypto/tefas: holdings symbols come from per-user
 # config (API-settable) and are used as a line-protocol tag -- \Z (not $) so a
@@ -86,8 +109,8 @@ class PortfolioPlugin:
     EGRESS = ["query1.finance.yahoo.com"]
 
     PRIVATE_PER_USER = True
-    # The time-series measurement this plugin writes (its platform scope).
-    TIMESERIES = {"measurements": ["portfolio_holding"]}
+    # The time-series measurements this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["portfolio_holding", "portfolio_index"]}
 
     # The platform's time-series handle (bind_timeseries); None until bound.
     _timeseries: Any = None
@@ -138,22 +161,25 @@ class PortfolioPlugin:
         self.symbols: List[str] = []
         self.sink_influxdb = True
         self._owner_id: Optional[str] = None
-        # owner_id -> symbol -> {"price", "as_of"}: the last point written for
-        # each owner (what get_value returns). Keyed by the exact owner_id (not
-        # a scrubbed form, under which distinct owners such as "auth0|123" and
-        # "auth0_123" would collide), so one owner never sees another's holdings.
-        self._recorded: Dict[str, Dict[str, Dict]] = {}
 
     def apply_config(self, cfg: Dict) -> None:
         """Map centrally-managed per-user config -> runtime state. ``_owner_id``
         is not a CONFIG_SCHEMA field -- it's injected only by monitoring.py's
         ``_collect_private_plugin_data``, never settable via the config API."""
         if "PORTFOLIO_HOLDINGS" in cfg:
-            self.symbols = [
-                s.strip().upper()
-                for s in str(cfg["PORTFOLIO_HOLDINGS"] or "").split(",")
-                if s.strip()
-            ]
+            symbols = list(
+                dict.fromkeys(
+                    s.strip().upper()
+                    for s in str(cfg["PORTFOLIO_HOLDINGS"] or "").split(",")
+                    if s.strip()
+                )
+            )
+            if len(symbols) > MAX_SYMBOLS:
+                logger.warning(
+                    f"⚠️ portfolio tracks at most {MAX_SYMBOLS} symbols; "
+                    f"ignoring {len(symbols) - MAX_SYMBOLS} more"
+                )
+            self.symbols = symbols[:MAX_SYMBOLS]
         if "PORTFOLIO_SINK_INFLUXDB" in cfg:
             v = cfg["PORTFOLIO_SINK_INFLUXDB"]
             self.sink_influxdb = (
@@ -263,11 +289,26 @@ class PortfolioPlugin:
                 f"⚠️ time-series write failed for {symbol}: {type(e).__name__}"
             )
             return False
-        as_of = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-        self._recorded.setdefault(str(self._owner_id), {})[symbol] = {
-            "price": close,
-            "as_of": as_of,
-        }
+        return True
+
+    async def _write_index(self) -> bool:
+        """Record which symbols the current owner tracks (what ``get_value``
+        reads back). Same guards as a holding write."""
+        sink = self._timeseries if self.sink_influxdb else None
+        if sink is None or not self._owner_id:
+            return False
+        symbols = [s for s in self.symbols if _SAFE_SYMBOL.match(s)][:MAX_SYMBOLS]
+        line = line_protocol(
+            _INDEX_MEASUREMENT,
+            {_INDEX_TAG[0]: _INDEX_TAG[1]},
+            {"symbols": ",".join(symbols)},
+            int(datetime.now(timezone.utc).timestamp()),
+        )
+        try:
+            await sink.write([line], "s")
+        except Exception as e:
+            logger.warning(f"⚠️ time-series index write failed: {type(e).__name__}")
+            return False
         return True
 
     # ── registry-driven reads ────────────────────────────────────────────────
@@ -285,9 +326,13 @@ class PortfolioPlugin:
             ts, close = point
             wrote = await self._write_holding(symbol, ts, close)
             result[symbol] = {"written": wrote, "latest_close": close}
+        # Also when the owner tracks nothing now, so get_value stops reporting
+        # symbols they removed.
+        indexed = await self._write_index()
         self._last = {
             "owner_id": self._owner_id,
             "symbols": result,
+            "indexed": indexed,
             "collected_at": datetime.now(timezone.utc).isoformat(),
         }
         written = sum(1 for r in result.values() if r.get("written"))
@@ -307,24 +352,67 @@ class PortfolioPlugin:
 
     # ── owner-scoped read-back action (#1035) ────────────────────────────────
     async def get_value(self, owner_id: str) -> Dict:
-        """Latest recorded price for each symbol THIS owner tracks: the last
-        point written for them (see the module docstring).
+        """Latest recorded price for each symbol THIS owner tracks, read from
+        the store (see the module docstring).
 
         ``owner_id`` is injected by plugin-registry's action dispatch from the
-        authenticated caller's JWT (PRIVATE_PER_USER, never caller-supplied), so a
-        user only ever sees their own holdings. Read-only."""
+        authenticated caller's JWT (PRIVATE_PER_USER, never caller-supplied), and
+        the platform scopes the reads to that same owner, so a user only ever
+        sees their own holdings. Read-only; never raises on a store hiccup
+        (returns an ``error`` marker and empty holdings instead)."""
         owner = str(owner_id or "").strip()
         if not owner:
             raise ValueError("owner_id is required")
-        holdings = {
-            sym: dict(point)
-            for sym, point in self._recorded.get(str(owner_id), {}).items()
-        }
+        base: Dict = {"owner_id": owner, "holdings": {}, "symbol_count": 0}
+        handle = self._timeseries
+        if handle is None:
+            return {**base, "message": "time-series storage is not available"}
+        try:
+            holdings = await self._read_holdings(handle)
+        except Exception as e:
+            kind = type(e).__name__
+            if kind in _REFUSED_ERRORS or kind in _REJECTED_ERRORS:
+                # Not a hiccup: the platform refused or rejected the read (a
+                # scope or owner problem). Its reason names no values.
+                reason = getattr(e, "reason", None) or str(e)
+                logger.error(f"❌ portfolio read {kind}: {str(reason)[:200]}")
+                marker = "read refused" if kind in _REFUSED_ERRORS else "read rejected"
+                return {**base, "error": marker}
+            logger.warning(f"⚠️ portfolio read failed: {kind}")
+            return {**base, "error": "read failed"}
         result: Dict = {
             "owner_id": owner,
             "holdings": holdings,
             "symbol_count": len(holdings),
         }
         if not holdings:
-            result["message"] = "no price recorded for you since the plugin started"
+            result["message"] = "no price recorded for you yet"
         return result
+
+    async def _read_holdings(self, handle: Any) -> Dict[str, Dict]:
+        index = await handle.latest(
+            _INDEX_MEASUREMENT, _INDEX_TAG[0], _INDEX_TAG[1], fields=["symbols"]
+        )
+        raw = (index or {}).get("fields", {}).get("symbols") if index else None
+        symbols = [
+            s.strip()
+            for s in str(raw or "").split(",")
+            if s.strip() and _SAFE_SYMBOL.match(s.strip())
+        ]
+        wanted = list(dict.fromkeys(symbols))[:MAX_SYMBOLS]
+        gate = asyncio.Semaphore(_READ_CONCURRENCY)
+
+        async def _one(symbol: str) -> Any:
+            async with gate:
+                return await handle.latest(
+                    _MEASUREMENT, "symbol", symbol, fields=["price"]
+                )
+
+        points = await asyncio.gather(*(_one(sym) for sym in wanted))
+        holdings: Dict[str, Dict] = {}
+        for symbol, point in zip(wanted, points):
+            price = (point or {}).get("fields", {}).get("price") if point else None
+            if price is None:
+                continue
+            holdings[symbol] = {"price": price, "as_of": point.get("time")}
+        return holdings
