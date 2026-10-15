@@ -246,7 +246,10 @@ class NewsPlugin:
         return {
             "healthy": True,
             "feeds": [name for name, _ in self.feeds],
-            "influxdb_sink": self.sink_influxdb,
+            # Points are written only with the toggle on AND a time-series
+            # handle bound by the host.
+            "influxdb_sink": self.sink_influxdb and self._timeseries is not None,
+            "timeseries_bound": self._timeseries is not None,
         }
 
     async def shutdown(self) -> None:

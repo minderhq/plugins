@@ -119,12 +119,21 @@ def test_get_value_never_returns_another_owners_holdings(bind_timeseries):
     assert asyncio.run(p.get_value("carol"))["holdings"] == {}
 
 
-def test_unsafe_owner_chars_are_scrubbed_not_rejected(bind_timeseries):
-    # A real JWT sub (| @ : and quotes) is scrubbed the same way on write and
-    # read (the platform's owner_id tag scrub), so it reads back what was written.
+def test_owner_ids_that_scrub_alike_never_share_holdings(bind_timeseries):
+    # "auth0|123" and "auth0_123" are different users even though both scrub to
+    # the same owner_id tag text; each must read back only their own record.
+    p, _ = _writing(bind_timeseries, owner="auth0|123")
+    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
+    p._owner_id = "auth0_123"
+    asyncio.run(p._write_holding("TSLA", 1609459200, 700.0))
+    assert set(asyncio.run(p.get_value("auth0|123"))["holdings"]) == {"AAPL"}
+    assert set(asyncio.run(p.get_value("auth0_123"))["holdings"]) == {"TSLA"}
+
+
+def test_owner_with_special_characters_reads_back_its_own_record(bind_timeseries):
     p, _ = _writing(bind_timeseries, owner="auth0|a'b @c")
     asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
-    assert set(p._recorded) == {"auth0_a_b__c"}
+    assert set(p._recorded) == {"auth0|a'b @c"}
     assert set(asyncio.run(p.get_value("auth0|a'b @c"))["holdings"]) == {"AAPL"}
 
 
@@ -176,7 +185,11 @@ def test_register_and_health():
     assert md.name == "portfolio"
     h = asyncio.run(p.health_check())
     assert h["healthy"] is True
-    assert h["sink_influxdb"] is p.sink_influxdb
+    # No time-series handle bound: nothing is written, whatever the toggle says.
+    assert h["sink_influxdb"] is False and h["timeseries_bound"] is False
+    p.bind_timeseries(object())
+    h = asyncio.run(p.health_check())
+    assert h["sink_influxdb"] is p.sink_influxdb and h["timeseries_bound"] is True
 
 
 def test_lifecycle_status_transitions():

@@ -182,7 +182,10 @@ class CryptoPlugin:
         return {
             "healthy": True,
             "symbols": self.symbols,
-            "influxdb_sink": self.sink_influxdb,
+            # Points are written only with the toggle on AND a time-series
+            # handle bound by the host.
+            "influxdb_sink": self.sink_influxdb and self._timeseries is not None,
+            "timeseries_bound": self._timeseries is not None,
         }
 
     async def shutdown(self) -> None:

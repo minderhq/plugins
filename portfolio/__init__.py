@@ -70,14 +70,6 @@ _MEASUREMENT = "portfolio_holding"
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
-def _owner_tag(owner: str) -> str:
-    """Scrub an owner_id (a JWT sub — may be ``auth0|123``, an email, ``a:b``…) to
-    the safe charset the platform uses for the ``owner_id`` tag it forces on
-    every point. Used as the key of the per-owner record ``get_value`` reads, so
-    the write and read paths agree (``auth0|123`` -> ``auth0_123`` on both)."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", owner)
-
-
 def _day_to_unix(day: date) -> int:
     """UTC-midnight unix timestamp for a calendar date -- Yahoo's chart API
     takes period1/period2 as unix seconds, but a `datetime.date` (from Yahoo's
@@ -146,9 +138,10 @@ class PortfolioPlugin:
         self.symbols: List[str] = []
         self.sink_influxdb = True
         self._owner_id: Optional[str] = None
-        # owner tag -> symbol -> {"price", "as_of"}: the last point written for
-        # each owner (what get_value returns). Keyed by owner, so one owner's
-        # call never sees another's holdings.
+        # owner_id -> symbol -> {"price", "as_of"}: the last point written for
+        # each owner (what get_value returns). Keyed by the exact owner_id (not
+        # a scrubbed form, under which distinct owners such as "auth0|123" and
+        # "auth0_123" would collide), so one owner never sees another's holdings.
         self._recorded: Dict[str, Dict[str, Dict]] = {}
 
     def apply_config(self, cfg: Dict) -> None:
@@ -188,7 +181,13 @@ class PortfolioPlugin:
 
     async def health_check(self) -> Dict:
         # MUST return {"healthy": <bool>} -- the monitoring loop reads health["healthy"].
-        return {"healthy": True, "sink_influxdb": self.sink_influxdb}
+        # Points are written only with the toggle on AND a time-series handle
+        # bound by the host.
+        return {
+            "healthy": True,
+            "sink_influxdb": self.sink_influxdb and self._timeseries is not None,
+            "timeseries_bound": self._timeseries is not None,
+        }
 
     async def shutdown(self) -> None:
         self.status = "shutdown"
@@ -265,7 +264,7 @@ class PortfolioPlugin:
             )
             return False
         as_of = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-        self._recorded.setdefault(_owner_tag(self._owner_id), {})[symbol] = {
+        self._recorded.setdefault(str(self._owner_id), {})[symbol] = {
             "price": close,
             "as_of": as_of,
         }
@@ -319,7 +318,7 @@ class PortfolioPlugin:
             raise ValueError("owner_id is required")
         holdings = {
             sym: dict(point)
-            for sym, point in self._recorded.get(_owner_tag(owner), {}).items()
+            for sym, point in self._recorded.get(str(owner_id), {}).items()
         }
         result: Dict = {
             "owner_id": owner,

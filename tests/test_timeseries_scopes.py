@@ -52,25 +52,59 @@ def test_every_writer_declares_its_measurements_and_takes_a_handle():
         assert callable(getattr(cls, "bind_timeseries", None)), pkg
 
 
-def test_declared_measurements_do_not_overlap():
-    plugins = _plugins()
-    declared = {
-        pkg: (getattr(cls, "TIMESERIES", None) or {}).get("measurements")
-        for pkg, cls in plugins.items()
-    }
+def _overlaps(declared):
+    """The scope conflicts the platform refuses at load, for ``{plugin:
+    measurements or None (undeclared)}``: a name declared twice, a declared
+    name inside an undeclared plugin's default scope, and two undeclared
+    plugins whose names normalise to the same prefix."""
+    problems = []
     seen = {}
     for pkg, names in declared.items():
         for name in names or ():
-            assert name not in seen, f"{name!r} declared by {seen.get(name)} and {pkg}"
-            seen[name] = pkg
+            if name in seen:
+                problems.append(f"{name!r} declared by {seen[name]} and {pkg}")
+            seen.setdefault(name, pkg)
     for name, owner in seen.items():
         for pkg, names in declared.items():
             if pkg == owner or names is not None:
                 continue
             prefix = _prefix(pkg)
-            assert not (
-                name == prefix or name.startswith(prefix + "_")
-            ), f"{owner}'s {name!r} falls in {pkg}'s default scope"
+            if name == prefix or name.startswith(prefix + "_"):
+                problems.append(f"{owner}'s {name!r} falls in {pkg}'s default scope")
+    prefixes = {}
+    for pkg, names in declared.items():
+        if names is None:
+            other = prefixes.setdefault(_prefix(pkg), pkg)
+            if other != pkg:
+                problems.append(f"{other} and {pkg} share the prefix {_prefix(pkg)!r}")
+    return problems
+
+
+def test_declared_measurements_do_not_overlap():
+    declared = {
+        pkg: (getattr(cls, "TIMESERIES", None) or {}).get("measurements")
+        for pkg, cls in _plugins().items()
+    }
+    assert _overlaps(declared) == []
+
+
+@pytest.mark.parametrize(
+    "declared,problem",
+    [
+        ({"a": ["m"], "b": ["m"]}, "declared by"),
+        ({"a": ["foo_bar"], "foo": None}, "default scope"),
+        ({"a": ["foo"], "foo": None}, "default scope"),
+        ({"my-plugin": None, "my_plugin": None}, "share the prefix 'my_plugin'"),
+    ],
+)
+def test_the_overlap_rule_catches_each_conflict(declared, problem):
+    (found,) = _overlaps(declared)
+    assert problem in found
+
+
+def test_the_overlap_rule_allows_nested_default_prefixes():
+    # foo / foo_bar: the longer default prefix wins, the platform allows it.
+    assert _overlaps({"foo": None, "foo_bar": None, "x": ["xm"]}) == []
 
 
 @pytest.mark.parametrize("pkg", sorted(_WRITERS))

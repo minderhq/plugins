@@ -94,7 +94,8 @@ def test_register_and_health():
         "healthy": True,
         "tefas_available": tefas_funds.TEFAS_AVAILABLE,
         "funds": ["AFA"],
-        "influxdb_sink": p.sink_influxdb,
+        "influxdb_sink": False,  # no time-series handle bound
+        "timeseries_bound": False,
     }
 
 

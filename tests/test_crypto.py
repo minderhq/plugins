@@ -194,7 +194,11 @@ def test_register_and_health():
     h = asyncio.run(p.health_check())
     assert h["healthy"] is True
     assert h["symbols"] == p.symbols
-    assert h["influxdb_sink"] is p.sink_influxdb
+    # No time-series handle bound: nothing is written, whatever the toggle says.
+    assert h["influxdb_sink"] is False and h["timeseries_bound"] is False
+    p.bind_timeseries(object())
+    h = asyncio.run(p.health_check())
+    assert h["influxdb_sink"] is p.sink_influxdb and h["timeseries_bound"] is True
 
 
 def test_lifecycle_status_transitions():
