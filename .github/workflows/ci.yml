@@ -76,6 +76,34 @@ jobs:
           uv pip compile pyproject.toml --extra dev -q -o "$RUNNER_TEMP/requirements.txt"
           pip-audit -r "$RUNNER_TEMP/requirements.txt" --no-deps --disable-pip --progress-spinner off
 
+  catalog:
+    name: Catalog Check
+    # Regenerate catalog.json from plugin introspection and fail if the
+    # committed file is stale OR the owner-approved runner-group trust list
+    # (trust/runner-groups.yml) is violated (ADR: out-of-process plugins,
+    # increment 4, D1.6: every plugin in exactly one group; MANAGES / EGRESS=lan
+    # plugins must be 'privileged'). GitHub-hosted only: public repo, fork PRs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: '3.12'
+          activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install catalog tooling
+        # The dev extra pins the plugin-sdk plus every plugin's runtime dep, so
+        # gen_catalog can import all 14 plugins to introspect them.
+        run: uv pip install -e ".[dev]"
+
+      - name: Catalog freshness + runner-group trust check
+        run: python scripts/gen_catalog.py --check
+
   secrets-scan:
     name: Secrets Scan
     # push (trusted, post-merge) runs on the org's self-hosted pool; pull_request

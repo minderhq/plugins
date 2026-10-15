@@ -1,0 +1,119 @@
+# Owner-approved trust gate (ADR: out-of-process plugins, increment 4, D1.6).
+#
+# The runner-group trust list (trust/**), CODEOWNERS, and this gate workflow
+# itself decide what plugin code is allowed to run and who reviews changes. A PR
+# that touches any of them must carry the `owner-approved` label — AND that
+# label must have been applied AFTER the current head commit was pushed, so that
+# pushing a new commit voids a prior approval (approval binds to the reviewed
+# content).
+#
+# This job is intended to be a REQUIRED status check on `main` (branch
+# protection). It fails closed: any uncertainty (missing label, label older than
+# the head commit, or an API error) fails the gate. The `owner-approved` label
+# is applied only by the owner after an explicit review (see .github/labels.yml).
+name: Owner Gate
+
+on:
+  pull_request:
+    # `labeled`/`unlabeled` re-run the gate the moment approval is granted or
+    # removed; `synchronize` re-runs it on every new push (which voids approval).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# Read-only: inspect the PR's files, labels, commit and timeline. No writes.
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  owner-gate:
+    name: Owner-approved trust gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const APPROVAL_LABEL = 'owner-approved';
+            // Paths whose change requires owner approval.
+            const isProtected = (p) =>
+              p.startsWith('trust/') ||
+              p === '.github/CODEOWNERS' ||
+              p === '.github/workflows/owner-gate.yml';
+
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+
+            // 1. Does this PR touch any protected path? If not, the gate passes.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const touched = files.map((f) => f.filename).filter(isProtected);
+            if (touched.length === 0) {
+              core.info('No protected paths changed — owner approval not required.');
+              return;
+            }
+            core.info(`Protected paths changed:\n  ${touched.join('\n  ')}`);
+
+            // 2. The label must be present right now. Read it from the live PR,
+            //    not the webhook payload, which can be stale on re-runs.
+            const { data: live } = await github.rest.pulls.get({
+              owner, repo, pull_number: pr.number,
+            });
+            const hasLabel = (live.labels || []).some((l) => l.name === APPROVAL_LABEL);
+            if (!hasLabel) {
+              core.setFailed(
+                `This PR changes owner-protected paths and needs the ` +
+                `\`${APPROVAL_LABEL}\` label (ADR D1.6). The owner applies it ` +
+                `after review.`,
+              );
+              return;
+            }
+
+            // 3. When was the head commit pushed? Use its committer date as the
+            //    push time (fail closed if it can't be read).
+            let headPushedAt;
+            try {
+              const { data: commit } = await github.rest.repos.getCommit({
+                owner, repo, ref: pr.head.sha,
+              });
+              headPushedAt = new Date(commit.commit.committer.date).getTime();
+            } catch (e) {
+              core.setFailed(`Could not read the head commit time: ${e.message}`);
+              return;
+            }
+
+            // 4. When was the label most recently applied? Scan the issue events
+            //    timeline for `labeled` events naming our label; take the latest.
+            const events = await github.paginate(github.rest.issues.listEvents, {
+              owner, repo, issue_number: pr.number, per_page: 100,
+            });
+            const labeledAt = events
+              .filter((e) => e.event === 'labeled' && e.label && e.label.name === APPROVAL_LABEL)
+              .map((e) => new Date(e.created_at).getTime());
+            if (labeledAt.length === 0) {
+              core.setFailed(
+                `The \`${APPROVAL_LABEL}\` label is present but no 'labeled' event ` +
+                `was found — cannot verify it post-dates the head commit. Failing closed.`,
+              );
+              return;
+            }
+            const lastLabeledAt = Math.max(...labeledAt);
+
+            // 5. Approval must be NEWER than the head commit. A push after
+            //    approval (headPushedAt >= lastLabeledAt) voids it.
+            if (lastLabeledAt <= headPushedAt) {
+              core.setFailed(
+                `The \`${APPROVAL_LABEL}\` label (applied ${new Date(lastLabeledAt).toISOString()}) ` +
+                `predates the head commit (${new Date(headPushedAt).toISOString()}). ` +
+                `Re-apply the label after the latest push to re-approve the reviewed content.`,
+              );
+              return;
+            }
+            core.info(
+              `Approved: \`${APPROVAL_LABEL}\` applied ${new Date(lastLabeledAt).toISOString()} ` +
+              `> head commit ${new Date(headPushedAt).toISOString()}.`,
+            );
