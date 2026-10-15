@@ -69,6 +69,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "export.arxiv.org"
@@ -139,6 +140,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "query1.finance.yahoo.com"
@@ -242,6 +244,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "api.frankfurter.app"
@@ -329,6 +332,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "api.github.com"
@@ -401,6 +405,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "hacker-news.firebaseio.com"
@@ -459,6 +464,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "privileged",
       "contract_version": 2,
       "egress": "lan",
       "manages": [],
@@ -531,6 +537,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": "public",
       "manages": [],
@@ -606,6 +613,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "openlibrary.org"
@@ -664,6 +672,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "query1.finance.yahoo.com"
@@ -737,6 +746,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "www.tefas.gov.tr"
@@ -771,6 +781,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "privileged",
       "contract_version": 2,
       "egress": [],
       "manages": [
@@ -836,6 +847,7 @@
       "display": {},
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "api.open-meteo.com",
@@ -945,6 +957,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 2,
       "egress": "public",
       "manages": [],
@@ -1014,6 +1027,7 @@
       },
       "runtime": "python",
       "tier": "T2",
+      "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
         "*.wikipedia.org"

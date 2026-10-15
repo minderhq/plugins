@@ -1,0 +1,42 @@
+# Owner-approved runner-group trust list (ADR: out-of-process plugins,
+# increment 4, D1.5/D1.6).
+#
+# This file is the single source of truth for which runner group each code
+# plugin is assigned to. It is NOT derived from directory ownership: it is an
+# explicit, owner-approved allowlist. Changes here are gated by the
+# `owner-approved` label (.github/workflows/owner-gate.yml) and reviewed via
+# CODEOWNERS. Catalog CI (scripts/gen_catalog.py) resolves each plugin's group
+# into catalog.json as `runner_group`, and fails if the file and the catalog
+# disagree.
+#
+# Rules enforced by scripts/gen_catalog.py:
+#   * every code plugin must appear in exactly one group (unlisted => CI fails);
+#   * a plugin that declares MANAGES (a managed sidecar) OR EGRESS = "lan"
+#     (LAN egress) MUST be listed under `privileged` — keeping grant holders
+#     and LAN-reaching plugins apart from plugins that fetch arbitrary URLs.
+#
+# Names are the plugin's catalog name (its register() name), which is what the
+# catalog is keyed by. Note this differs from the directory for `tefas_funds`,
+# whose plugin name is `tefas`.
+#
+# Shape: two top-level keys, one plugin name per `  - ` line. The loader in
+# gen_catalog.py is a minimal, fail-closed parser for exactly this structure —
+# keep it to `trusted:` / `privileged:` plus `  - name` lines and `#` comments.
+
+trusted:
+  - arxiv
+  - crypto
+  - frankfurter
+  - github
+  - hackernews
+  - news
+  - openlibrary
+  - portfolio
+  - tefas
+  - weather
+  - webcrawl
+  - wikipedia
+
+privileged:
+  - network
+  - telegraf
