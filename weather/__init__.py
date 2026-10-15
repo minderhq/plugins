@@ -7,9 +7,10 @@ Grafana can chart them. The registry drives ``collect_data`` on its hourly loop;
 ``get_weather`` is an on-demand action + Ollama tool that resolves any city name via
 Open-Meteo's (also keyless) geocoding API.
 
-Uses only deps already in the plugin-registry image (``httpx``) — InfluxDB is written
-over its HTTP ``/api/v2/write`` endpoint (line protocol), same as the crypto plugin.
-Bind-mounted: edit + ``docker restart minder-plugin-registry``, no image rebuild.
+Uses only deps already in the plugin-registry image (``httpx``). Points are written
+through the time-series handle the platform binds at load (``bind_timeseries``),
+scoped to this plugin's ``TIMESERIES`` measurement; the plugin holds no InfluxDB
+address or token, and with no handle bound the sink is skipped.
 
 Config (env on plugin-registry; all optional — keyless defaults):
   WEATHER_LOCATIONS    ``name:lat:lon`` triples, comma-sep
@@ -23,7 +24,7 @@ Config (env on plugin-registry; all optional — keyless defaults):
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 
@@ -44,6 +45,11 @@ class WeatherPlugin:
     # Where this plugin connects (contract-v2 EGRESS declaration): the default
     # WEATHER_API_BASE / WEATHER_GEOCODE_BASE hosts.
     EGRESS = ["api.open-meteo.com", "geocoding-api.open-meteo.com"]
+    # The time-series measurement this plugin writes (its platform scope).
+    TIMESERIES = {"measurements": ["weather"]}
+
+    # The platform's time-series handle (bind_timeseries); None until bound.
+    _timeseries: Any = None
 
     ACTIONS = frozenset({"refresh", "get_weather"})
     # Read-only subset of ACTIONS, reachable unauthenticated via GET (#254) —
@@ -155,7 +161,10 @@ class WeatherPlugin:
         return {
             "healthy": True,
             "locations": [name for name, _, _ in self.locations],
-            "influxdb_sink": self.sink_influxdb,
+            # Points are written only with the toggle on AND a time-series
+            # handle bound by the host.
+            "influxdb_sink": self.sink_influxdb and self._timeseries is not None,
+            "timeseries_bound": self._timeseries is not None,
         }
 
     async def shutdown(self) -> None:
@@ -210,14 +219,17 @@ class WeatherPlugin:
             # present but non-numeric coords → fail soft (None), not a 500.
             return None
 
+    def bind_timeseries(self, handle: Any) -> None:
+        """Called by the host at load with this plugin's time-series handle
+        (``write(lines, precision)``, scoped to ``TIMESERIES``). The plugin holds
+        no InfluxDB address or token; with no handle bound the sink is skipped."""
+        self._timeseries = handle
+
     async def _write_influxdb(self, readings: Dict[str, Dict]) -> bool:
-        """Write readings to InfluxDB via the HTTP /api/v2/write API (line protocol)."""
-        cfg = self.config.get("influxdb") or {}
-        if not (self.sink_influxdb and cfg.get("enabled") and readings):
+        """Write readings (line protocol) through the platform's time-series handle."""
+        sink = self._timeseries if self.sink_influxdb else None
+        if not (sink is not None and readings):
             return False
-        host, port = cfg.get("host", "minder-influxdb"), cfg.get("port", 8086)
-        org, bucket = cfg.get("org", "minder"), cfg.get("bucket", "minder-metrics")
-        token = cfg.get("token", "")
 
         # Cast to float so every reading is a FLOAT field: this series has always
         # been float-typed (the old writer emitted a bare `{v}`, no `i` suffix),
@@ -246,19 +258,11 @@ class WeatherPlugin:
         lines = [ln for ln in lines if ln]
         if not lines:
             return False
-        url = f"http://{host}:{port}/api/v2/write"
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
-                resp = await client.post(
-                    url,
-                    params={"org": org, "bucket": bucket, "precision": "s"},
-                    headers={"Authorization": f"Token {token}"},
-                    content="\n".join(lines),
-                )
-                resp.raise_for_status()
+            await sink.write(lines, "s")
             return True
         except Exception as e:
-            logger.warning(f"⚠️ InfluxDB write failed: {type(e).__name__}")
+            logger.warning(f"⚠️ time-series write failed: {type(e).__name__}")
             return False
 
     # ── registry-driven reads ────────────────────────────────────────────────

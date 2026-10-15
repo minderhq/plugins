@@ -154,33 +154,38 @@ def test_collect_data_skips_failed_and_gates_influx(monkeypatch):
     assert res["influxdb_written"] is False
 
 
-def test_write_influxdb_emits_escaped_line_protocol(monkeypatch):
+def test_write_influxdb_emits_escaped_line_protocol(bind_timeseries):
     p = GitHubPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    cap = {}
-    monkeypatch.setattr(github.httpx, "AsyncClient", _client({}, capture=cap))
+    ts = bind_timeseries(p)
+    assert p.TIMESERIES == {"measurements": ["github_repo"]}
     ok = asyncio.run(
         p._write_influxdb({"owner/repo": {"stars": 5, "forks": 2, "open_issues": 1}})
     )
     assert ok is True
     # '/' is legal unescaped in a tag; fields are integers with an 'i' suffix
-    assert (
-        cap["content"] == "github_repo,repo=owner/repo stars=5i,forks=2i,open_issues=1i"
-    )
+    assert ts.lines == ["github_repo,repo=owner/repo stars=5i,forks=2i,open_issues=1i"]
 
 
-def test_write_influxdb_skips_non_int_fields(monkeypatch):
+def test_write_influxdb_skips_non_int_fields(bind_timeseries):
     p = GitHubPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    cap = {}
-    monkeypatch.setattr(github.httpx, "AsyncClient", _client({}, capture=cap))
+    ts = bind_timeseries(p)
     # a repo whose API returned None counts contributes no fields → no line → False
     ok = asyncio.run(
         p._write_influxdb({"a/b": {"stars": None, "forks": None, "open_issues": None}})
     )
     assert ok is False
+    assert ts.batches == []
+
+
+def test_write_influxdb_without_handle_or_on_failure(bind_timeseries):
+    stats = {"a/b": {"stars": 1, "forks": 1, "open_issues": 1}}
+    p = GitHubPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    p.sink_influxdb = True
+    assert asyncio.run(p._write_influxdb(stats)) is False  # no handle bound
+    bind_timeseries(p, fail_write=RuntimeError("down"))
+    assert asyncio.run(p._write_influxdb(stats)) is False
 
 
 def test_parse_repos_lowercases_for_case_insensitive_dedup():

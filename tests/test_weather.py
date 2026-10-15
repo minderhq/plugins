@@ -112,7 +112,11 @@ def test_register_and_health():
     h = asyncio.run(p.health_check())
     assert h["healthy"] is True
     assert set(h["locations"]) == {n for n, _, _ in p.locations}
-    assert h["influxdb_sink"] is p.sink_influxdb
+    # No time-series handle bound: nothing is written, whatever the toggle says.
+    assert h["influxdb_sink"] is False and h["timeseries_bound"] is False
+    p.bind_timeseries(object())
+    h = asyncio.run(p.health_check())
+    assert h["influxdb_sink"] is p.sink_influxdb and h["timeseries_bound"] is True
 
 
 def test_lifecycle_status_transitions():
@@ -259,35 +263,15 @@ def test_collect_data_skips_failed_locations_and_gates_influx(monkeypatch):
     assert res["influxdb_written"] is False
 
 
-def test_write_influxdb_emits_float_fields_not_integers(monkeypatch):
+def test_write_influxdb_emits_float_fields_not_integers(bind_timeseries):
     """Guard the type-preservation decision: this series has always been float
     (the old writer emitted a bare value, no 'i' suffix). An integer humidity
-    (2) must still be written as a FLOAT (2.0), or InfluxDB rejects the point on
+    (2) must still be written as a FLOAT (2.0), or the store rejects the point on
     a field-type conflict with the existing float column."""
     p = WeatherPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    cap = {}
-
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, params=None, headers=None, content=None):
-            cap["content"] = content
-            return _Resp()
-
-    monkeypatch.setattr(weather.httpx, "AsyncClient", _Client)
+    ts = bind_timeseries(p)
+    assert p.TIMESERIES == {"measurements": ["weather"]}
     ok = asyncio.run(
         p._write_influxdb(
             {"Ankara": {"temperature": 5.0, "humidity": 2, "wind_speed": 3}}
@@ -295,52 +279,51 @@ def test_write_influxdb_emits_float_fields_not_integers(monkeypatch):
     )
     assert ok is True
     # no 'i' suffix anywhere — every field is a float
-    assert (
-        cap["content"]
-        == "weather,location=Ankara temperature=5.0,humidity=2.0,wind_speed=3.0"
-    )
-    assert "i," not in cap["content"] and not cap["content"].rstrip().endswith("i")
+    assert ts.batches == [
+        (["weather,location=Ankara temperature=5.0,humidity=2.0,wind_speed=3.0"], "s")
+    ]
 
 
 # ── _write_influxdb gating / fail-soft ───────────────────────────────────────
 _READING = {"Istanbul": {"temperature": 20, "humidity": 50, "wind_speed": 5}}
 
 
-def test_write_influxdb_noop_when_sink_disabled():
+def test_write_influxdb_noop_when_sink_disabled(bind_timeseries):
     p = WeatherPlugin()
+    ts = bind_timeseries(p)
     p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
+    assert asyncio.run(p._write_influxdb(_READING)) is False
+    assert ts.batches == []
+
+
+def test_write_influxdb_noop_without_a_handle():
+    p = WeatherPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    p.sink_influxdb = True
     assert asyncio.run(p._write_influxdb(_READING)) is False
 
 
-def test_write_influxdb_noop_when_influxdb_not_enabled():
+def test_write_influxdb_noop_when_readings_empty(bind_timeseries):
     p = WeatherPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": False}}
-    assert asyncio.run(p._write_influxdb(_READING)) is False
-
-
-def test_write_influxdb_noop_when_readings_empty():
-    p = WeatherPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
+    ts = bind_timeseries(p)
     assert asyncio.run(p._write_influxdb({})) is False
+    assert ts.batches == []
 
 
-def test_write_influxdb_noop_when_no_numeric_fields():
+def test_write_influxdb_noop_when_no_numeric_fields(bind_timeseries):
     # all-None readings produce no line-protocol lines → nothing to write.
     p = WeatherPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
+    ts = bind_timeseries(p)
     readings = {"Istanbul": {"temperature": None, "humidity": None, "wind_speed": None}}
     assert asyncio.run(p._write_influxdb(readings)) is False
+    assert ts.batches == []
 
 
-def test_write_influxdb_failure_returns_false(monkeypatch):
+def test_write_influxdb_failure_returns_false(bind_timeseries):
     p = WeatherPlugin()
     p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    monkeypatch.setattr(weather.httpx, "AsyncClient", _post_client(raise_on_post=True))
+    bind_timeseries(p, fail_write=RuntimeError("boom"))
     assert asyncio.run(p._write_influxdb(_READING)) is False
 
 

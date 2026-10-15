@@ -144,7 +144,9 @@
         "query1.finance.yahoo.com"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "crypto_price"
+      ],
       "dependencies": []
     },
     {
@@ -245,7 +247,9 @@
         "api.frankfurter.app"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "fx_rate"
+      ],
       "dependencies": []
     },
     {
@@ -330,7 +334,9 @@
         "api.github.com"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "github_repo"
+      ],
       "dependencies": []
     },
     {
@@ -528,7 +534,9 @@
       "contract_version": 1,
       "egress": "public",
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "news"
+      ],
       "dependencies": []
     },
     {
@@ -661,7 +669,9 @@
         "query1.finance.yahoo.com"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "portfolio_holding"
+      ],
       "dependencies": []
     },
     {
@@ -731,7 +741,9 @@
         "www.tefas.gov.tr"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "tefas_fund_price"
+      ],
       "dependencies": []
     },
     {
@@ -829,7 +841,9 @@
         "geocoding-api.open-meteo.com"
       ],
       "manages": [],
-      "timeseries": null,
+      "timeseries": [
+        "weather"
+      ],
       "dependencies": []
     },
     {

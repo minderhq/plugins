@@ -1,7 +1,7 @@
 """Behavioural tests for the portfolio (per-user holdings) plugin — config
-coercion + owner injection, and the owner-scoped get_value read: required/unsafe
-owner guards, the influx-disabled short-circuit, the newest-first symbol dedup,
-and the fail-soft read-error path. HTTP is faked; no network.
+coercion + owner injection, the owner-scoped write through the platform's
+time-series handle, and the owner-scoped get_value read of the last point written
+per owner. HTTP is faked; no network.
 """
 
 import asyncio
@@ -12,40 +12,6 @@ import pytest
 
 import portfolio
 from portfolio import _SAFE_SYMBOL, PortfolioPlugin
-
-
-def _post_client(rows, *, raise_on_post=False, capture=None):
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return rows
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, json=None, headers=None):
-            if capture is not None:
-                capture["json"] = json
-                capture["query"] = (json or {}).get("q", "")
-            if raise_on_post:
-                raise RuntimeError("boom")
-            return _Resp()
-
-    return _Client
-
-
-def _enabled(p):
-    p.config = {"influxdb": {"enabled": True, "token": "t"}}
-    return p
 
 
 def _ts(y, m, d):
@@ -91,31 +57,6 @@ def _yahoo_get_client(payload, *, raise_on_get=False):
     return _Client
 
 
-def _write_capture_client(*, raise_on_post=False, capture=None):
-    class _Resp:
-        def raise_for_status(self):
-            return None
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, params=None, headers=None, content=None):
-            if capture is not None:
-                capture["content"] = content
-            if raise_on_post:
-                raise RuntimeError("boom")
-            return _Resp()
-
-    return _Client
-
-
 # ── apply_config ─────────────────────────────────────────────────────────────
 def test_apply_config_holdings_and_owner_injection():
     p = PortfolioPlugin()
@@ -140,53 +81,60 @@ def test_get_value_requires_owner():
         asyncio.run(PortfolioPlugin().get_value(""))
 
 
-def test_unsafe_owner_chars_are_scrubbed_not_rejected(monkeypatch):
-    # an owner with SQL/line-protocol metacharacters (apostrophe, and real JWT-sub
-    # chars like | @ :) is SCRUBBED to the safe charset — not rejected — so it
-    # reads back what the write path (same scrub) stored. No SQL injection.
-    p = _enabled(PortfolioPlugin())
-    cap = {}
-    monkeypatch.setattr(portfolio.httpx, "AsyncClient", _post_client([], capture=cap))
-    asyncio.run(p.get_value("auth0|a'b @c"))  # must NOT raise
-    # the value is scrubbed to the safe charset (no injection chars leak in); the
-    # only quotes in the query are the SQL string delimiters around that value.
-    assert "owner_id = 'auth0_a_b__c'" in cap["query"]
-    assert "|" not in cap["query"] and "a'b" not in cap["query"]
-
-
-def test_get_value_influx_disabled_short_circuits():
+def _writing(bind_timeseries, owner="alice", **kwargs):
     p = PortfolioPlugin()
-    p.config = {"influxdb": {"enabled": False}}
-    res = asyncio.run(p.get_value("u1"))
-    assert res["message"] == "influxdb not configured"
-    assert res["holdings"] == {}
+    p.sink_influxdb = True
+    p._owner_id = owner
+    return p, bind_timeseries(p, **kwargs)
 
 
-# ── get_value dedup ──────────────────────────────────────────────────────────
-def test_get_value_dedupes_newest_first(monkeypatch):
-    p = _enabled(PortfolioPlugin())
-    rows = [
-        {"symbol": "AAPL", "price": 190.0, "time": "2021-01-03"},  # newest AAPL
-        {"symbol": "AAPL", "price": 180.0, "time": "2021-01-02"},  # older → dropped
-        "not-a-dict",  # skipped
-        {"symbol": None, "time": "x"},  # no symbol → skipped
-        {"symbol": "MSFT", "price": 300.0, "time": "2021-01-03"},
-    ]
-    monkeypatch.setattr(portfolio.httpx, "AsyncClient", _post_client(rows))
-    res = asyncio.run(p.get_value("u1"))
+def test_get_value_before_any_write_is_empty():
+    res = asyncio.run(PortfolioPlugin().get_value("u1"))
+    assert res["holdings"] == {} and res["symbol_count"] == 0
+    assert "no price recorded" in res["message"]
+
+
+def test_get_value_returns_the_last_point_written_for_that_owner(bind_timeseries):
+    p, _ = _writing(bind_timeseries)
+    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
+    asyncio.run(p._write_holding("AAPL", 1609545600, 190.0))  # newer wins
+    asyncio.run(p._write_holding("MSFT", 1609545600, 300.0))
+    res = asyncio.run(p.get_value("alice"))
     assert res["symbol_count"] == 2
-    assert res["holdings"]["AAPL"] == {"price": 190.0, "as_of": "2021-01-03"}
-    assert res["holdings"]["MSFT"] == {"price": 300.0, "as_of": "2021-01-03"}
+    assert res["holdings"]["AAPL"] == {
+        "price": 190.0,
+        "as_of": "2021-01-02T00:00:00+00:00",
+    }
+    assert res["holdings"]["MSFT"]["price"] == 300.0
+    assert "message" not in res
 
 
-def test_get_value_read_error_is_fail_soft(monkeypatch):
-    p = _enabled(PortfolioPlugin())
-    monkeypatch.setattr(
-        portfolio.httpx, "AsyncClient", _post_client([], raise_on_post=True)
-    )
-    res = asyncio.run(p.get_value("u1"))
-    assert res["error"] == "read failed"
-    assert res["holdings"] == {}
+def test_get_value_never_returns_another_owners_holdings(bind_timeseries):
+    p, _ = _writing(bind_timeseries)
+    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
+    p._owner_id = "bob"
+    asyncio.run(p._write_holding("TSLA", 1609459200, 700.0))
+    assert set(asyncio.run(p.get_value("alice"))["holdings"]) == {"AAPL"}
+    assert set(asyncio.run(p.get_value("bob"))["holdings"]) == {"TSLA"}
+    assert asyncio.run(p.get_value("carol"))["holdings"] == {}
+
+
+def test_owner_ids_that_scrub_alike_never_share_holdings(bind_timeseries):
+    # "auth0|123" and "auth0_123" are different users even though both scrub to
+    # the same owner_id tag text; each must read back only their own record.
+    p, _ = _writing(bind_timeseries, owner="auth0|123")
+    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
+    p._owner_id = "auth0_123"
+    asyncio.run(p._write_holding("TSLA", 1609459200, 700.0))
+    assert set(asyncio.run(p.get_value("auth0|123"))["holdings"]) == {"AAPL"}
+    assert set(asyncio.run(p.get_value("auth0_123"))["holdings"]) == {"TSLA"}
+
+
+def test_owner_with_special_characters_reads_back_its_own_record(bind_timeseries):
+    p, _ = _writing(bind_timeseries, owner="auth0|a'b @c")
+    asyncio.run(p._write_holding("AAPL", 1609459200, 180.0))
+    assert set(p._recorded) == {"auth0|a'b @c"}
+    assert set(asyncio.run(p.get_value("auth0|a'b @c"))["holdings"]) == {"AAPL"}
 
 
 # ── __init__ defaults / owner injection semantics ────────────────────────────
@@ -237,7 +185,11 @@ def test_register_and_health():
     assert md.name == "portfolio"
     h = asyncio.run(p.health_check())
     assert h["healthy"] is True
-    assert h["sink_influxdb"] is p.sink_influxdb
+    # No time-series handle bound: nothing is written, whatever the toggle says.
+    assert h["sink_influxdb"] is False and h["timeseries_bound"] is False
+    p.bind_timeseries(object())
+    h = asyncio.run(p.health_check())
+    assert h["sink_influxdb"] is p.sink_influxdb and h["timeseries_bound"] is True
 
 
 def test_lifecycle_status_transitions():
@@ -302,110 +254,56 @@ def test_fetch_latest_close_unsafe_symbol_skips_http_call(monkeypatch, caplog):
     assert any("unsafe symbol" in r.message for r in caplog.records)
 
 
-# ── _influx_cfg gating ───────────────────────────────────────────────────────
-def test_influx_cfg_none_when_sink_disabled():
-    p = PortfolioPlugin()
-    p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
-    assert p._influx_cfg() is None
-
-
-def test_influx_cfg_returns_cfg_when_enabled():
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    cfg = {"enabled": True, "host": "h", "port": 1}
-    p.config = {"influxdb": cfg}
-    assert p._influx_cfg() is cfg
-
-
 # ── _write_holding — the per-user tenancy guarantee this plugin exists for ───
-def test_write_holding_refuses_without_owner_id_set(monkeypatch, caplog):
+def test_declares_its_measurement_and_holds_no_influx_credentials():
+    p = PortfolioPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    p._owner_id = "alice"
+    assert p.TIMESERIES == {"measurements": ["portfolio_holding"]}
+    assert not hasattr(p, "_influx_cfg")
+    # No handle bound: nothing is written, whatever the config holds.
+    assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is False
+
+
+def test_write_holding_refuses_without_owner_id_set(bind_timeseries, caplog):
     # The core guarantee: never write under a blank/shared owner just because a
     # direct collect_data() ran outside the per-owner scheduler path.
-    called = {"n": 0}
-
-    class _Boom:
-        def __init__(self, *a, **kw):
-            called["n"] += 1
-
-    monkeypatch.setattr(portfolio.httpx, "AsyncClient", _Boom)
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    assert p._owner_id is None
+    p, ts = _writing(bind_timeseries, owner=None)
     with caplog.at_level("WARNING"):
         out = asyncio.run(p._write_holding("AAPL", 1700000000, 150.0))
     assert out is False
-    assert called["n"] == 0
+    assert ts.batches == []
     assert any("owner_id" in r.message for r in caplog.records)
 
 
-def test_write_holding_false_when_cfg_none():
-    p = PortfolioPlugin()
+def test_write_holding_false_when_sink_disabled(bind_timeseries):
+    p, ts = _writing(bind_timeseries)
     p.sink_influxdb = False
-    p._owner_id = "alice"
     assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is False
+    assert ts.batches == []
 
 
-def test_write_holding_unsafe_symbol_skips_http_call(monkeypatch, caplog):
-    called = {"n": 0}
-
-    class _Boom:
-        def __init__(self, *a, **kw):
-            called["n"] += 1
-
-    monkeypatch.setattr(portfolio.httpx, "AsyncClient", _Boom)
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    p._owner_id = "alice"
+def test_write_holding_unsafe_symbol_skips_the_write(bind_timeseries):
+    p, ts = _writing(bind_timeseries)
     assert not _SAFE_SYMBOL.match("AAPL'; DROP TABLE x --")
-    with caplog.at_level("WARNING"):
-        out = asyncio.run(p._write_holding("AAPL'; DROP TABLE x --", 1, 1.0))
-    assert out is False
-    assert called["n"] == 0
+    assert asyncio.run(p._write_holding("AAPL'; DROP TABLE x --", 1, 1.0)) is False
+    assert ts.batches == []
 
 
-def test_write_holding_success_tags_owner_id_in_line_protocol(monkeypatch):
-    cap = {}
-    monkeypatch.setattr(
-        portfolio.httpx, "AsyncClient", _write_capture_client(capture=cap)
-    )
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True, "host": "h", "port": 1}}
-    p._owner_id = "alice"
-    out = asyncio.run(p._write_holding("AAPL", 1700000000, 150.0))
-    assert out is True
-    assert "owner_id=alice" in cap["content"]
-    assert "symbol=AAPL" in cap["content"]
+def test_write_holding_leaves_the_owner_tag_to_the_platform(bind_timeseries):
+    # The platform forces owner_id (and plugin) on every point; the plugin sends
+    # only its own tags, so it cannot name another owner.
+    p, ts = _writing(bind_timeseries)
+    assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is True
+    assert ts.batches == [
+        (["portfolio_holding,symbol=AAPL price=150.0 1700000000"], "s")
+    ]
+    assert "owner_id" not in ts.lines[0]
 
 
-def test_write_holding_sanitizes_owner_id_metacharacters(monkeypatch):
-    # a JWT sub with line-protocol metacharacters (space, comma, equals) must be
-    # scrubbed to the safe charset before it lands as a tag — same scrub as read.
-    cap = {}
-    monkeypatch.setattr(
-        portfolio.httpx, "AsyncClient", _write_capture_client(capture=cap)
-    )
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True, "host": "h", "port": 1}}
-    p._owner_id = "ali ce,x=y"
-    asyncio.run(p._write_holding("AAPL", 1700000000, 150.0))
-    owner_field = cap["content"].split("owner_id=")[1].split(" ")[0]
-    assert "," not in owner_field and "=" not in owner_field and " " not in owner_field
-
-
-def test_write_holding_false_on_http_exception(monkeypatch):
-    monkeypatch.setattr(
-        portfolio.httpx, "AsyncClient", _write_capture_client(raise_on_post=True)
-    )
-    p = PortfolioPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
-    p._owner_id = "alice"
+def test_write_holding_false_on_write_failure_and_records_nothing(bind_timeseries):
+    p, _ = _writing(bind_timeseries, fail_write=RuntimeError("boom"))
     assert asyncio.run(p._write_holding("AAPL", 1700000000, 150.0)) is False
+    assert p._recorded == {}
 
 
 # ── collect_data (per-owner) / analyze ───────────────────────────────────────

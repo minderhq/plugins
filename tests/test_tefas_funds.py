@@ -94,7 +94,8 @@ def test_register_and_health():
         "healthy": True,
         "tefas_available": tefas_funds.TEFAS_AVAILABLE,
         "funds": ["AFA"],
-        "influxdb_sink": p.sink_influxdb,
+        "influxdb_sink": False,  # no time-series handle bound
+        "timeseries_bound": False,
     }
 
 
@@ -227,50 +228,57 @@ def test_fetch_sync_skips_nan_price(monkeypatch):
     assert [pr for _, pr in out] == [1.5, 2.5]
 
 
-# ── _influx_cfg gating (pure plugin logic) ───────────────────────────────────
-def test_influx_cfg_none_when_sink_disabled():
-    p = TefasPlugin()
-    p.sink_influxdb = False
-    p.config = {"influxdb": {"enabled": True}}
-    assert p._influx_cfg() is None
-
-
-def test_influx_cfg_none_when_influxdb_not_enabled():
-    p = TefasPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": False}}
-    assert p._influx_cfg() is None
-
-
-def test_influx_cfg_returns_cfg_when_enabled():
-    p = TefasPlugin()
-    p.sink_influxdb = True
-    cfg = {"enabled": True, "host": "h", "port": 1}
-    p.config = {"influxdb": cfg}
-    assert p._influx_cfg() is cfg
-
-
-# The InfluxDB read/write helpers are the SDK's (tested in the SDK's own
-# test_influx.py); here we only assert the plugin's gating short-circuits.
-def test_latest_influx_date_none_when_sink_off():
-    p = TefasPlugin()
-    p.sink_influxdb = False
-    p.config = {}
+# ── time series: the platform handle (bind_timeseries), no raw credentials ────
+def test_declares_its_measurement_and_holds_no_influx_credentials():
+    p = TefasPlugin({"influxdb": {"enabled": True, "token": "t"}})
+    assert p.TIMESERIES == {"measurements": ["tefas_fund_price"]}
+    assert not hasattr(p, "_influx_cfg")
+    # Without a bound handle nothing is read or written.
     assert asyncio.run(p._latest_influx_date("AFA")) is None
-
-
-def test_write_history_zero_when_sink_off():
-    p = TefasPlugin()
-    p.sink_influxdb = False
-    p.config = {}
     assert asyncio.run(p._write_history("AFA", [(1, 1.0)])) == 0
 
 
-def test_write_history_zero_when_points_empty():
+def test_sink_off_skips_the_handle(bind_timeseries):
     p = TefasPlugin()
-    p.sink_influxdb = True
-    p.config = {"influxdb": {"enabled": True}}
+    ts = bind_timeseries(p)
+    p.sink_influxdb = False
+    assert asyncio.run(p._latest_influx_date("AFA")) is None
+    assert asyncio.run(p._write_history("AFA", [(1, 1.0)])) == 0
+    assert ts.batches == [] and ts.latest_calls == []
+
+
+def test_write_history_through_the_handle_in_chunks(bind_timeseries):
+    p = TefasPlugin()
+    ts = bind_timeseries(p)
     assert asyncio.run(p._write_history("AFA", [])) == 0
+    assert asyncio.run(p._write_history("AFA", [(100, 1.25)])) == 1
+    assert ts.batches == [(["tefas_fund_price,code=AFA price=1.25 100"], "s")]
+    points = [(i, 1.0) for i in range(1, 4502)]
+    assert asyncio.run(p._write_history("AFA", points)) == 4501
+    assert [len(b) for b, _ in ts.batches[1:]] == [2000, 2000, 501]
+
+
+def test_write_history_fail_soft_and_unsafe_code(bind_timeseries):
+    p = TefasPlugin()
+    bind_timeseries(p, fail_write=RuntimeError("down"))
+    assert asyncio.run(p._write_history("AFA", [(1, 1.0)])) == 0
+    p2 = TefasPlugin()
+    ts = bind_timeseries(p2)
+    assert asyncio.run(p2._write_history("A,B", [(1, 1.0)])) == 0
+    assert ts.batches == []
+
+
+def test_latest_influx_date_reads_the_resume_point(bind_timeseries):
+    p = TefasPlugin()
+    ts = bind_timeseries(
+        p, latest={("tefas_fund_price", "code", "AFA"): "2024-02-01T00:00:00"}
+    )
+    assert asyncio.run(p._latest_influx_date("AFA")) == date(2024, 2, 1)
+    assert asyncio.run(p._latest_influx_date("A B")) is None
+    assert ts.latest_calls == [("tefas_fund_price", "code", "AFA")]
+    p2 = TefasPlugin()
+    bind_timeseries(p2, fail_latest=RuntimeError("down"))
+    assert asyncio.run(p2._latest_influx_date("AFA")) is None
 
 
 # ── collect_data — resume-point vs configured-start branching ────────────────
