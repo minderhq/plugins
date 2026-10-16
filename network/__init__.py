@@ -61,10 +61,19 @@ Config (env on plugin-registry):
   _AUTH_PROTO (SHA|MD5) / _AUTH_PASS / _PRIV_PROTO (AES|DES) / _PRIV_PASS.
   NETWORK_SINK_TELEGRAF / _POSTGRES / _NEO4J / _RABBITMQ  ("1"/"0", default "1").
 
+SNMP credentials (NETWORK_SNMP_COMMUNITY, NETWORK_SNMP_V3_AUTH_PASS,
+NETWORK_SNMP_V3_PRIV_PASS) are read before every scan from the plugin's own
+secrets (``self.ctx.secrets.get`` with those same key names). A process that
+runs this plugin out of process holds no platform secrets in its environment,
+so the secrets store is how the credentials reach it there. When a key is not
+set, or the host offers no secrets for the call, the value from the
+environment above is used (in-process hosts keep working unchanged).
+
 Only scan networks you are authorised to (your own infra).
 
 SECURITY: SNMP v3 auth/priv passphrases are passed to the net-snmp CLI on argv
-(visible via ps / /proc within this container, which already holds them as env). Sink
+(visible via ps / /proc within this container, which holds them as env or reads them
+from its secrets). Secret values are never logged, only key names. Sink
 credentials go over HTTP client auth, not URLs; sink error logs record the exception
 TYPE only, never the message, to avoid leaking secrets.
 """
@@ -80,7 +89,11 @@ from typing import Dict, List, Optional
 
 import httpx
 from minder_plugin_sdk import UNBOUND_CONTEXT, CapabilityUnavailable, PluginMetadata
-from minder_plugin_sdk.context import CAP_PLUGINS_INVOKE, PlatformContext
+from minder_plugin_sdk.context import (
+    CAP_PLUGINS_INVOKE,
+    CAP_SECRETS_READ,
+    PlatformContext,
+)
 
 from .helpers import (  # noqa: F401 (re-exported for the plugin + its tests)
     _ARP_MAC_OID,
@@ -121,6 +134,14 @@ _NMAP_HOST_TIMEOUT = "30s"
 _NMAP_MAX_TIMEOUT = 1800  # cap the whole-scan timeout (s) regardless of host count
 _SNMP_TIMEOUT = "2"
 _SNMP_MAX_CONCURRENCY = 16
+
+# SNMP credentials read through self.ctx.secrets: attribute -> secret key. The
+# key names match the environment fallbacks, so one name works in both modes.
+_SNMP_SECRET_KEYS = {
+    "snmp_community": "NETWORK_SNMP_COMMUNITY",
+    "snmp_v3_auth_pass": "NETWORK_SNMP_V3_AUTH_PASS",
+    "snmp_v3_priv_pass": "NETWORK_SNMP_V3_PRIV_PASS",
+}
 
 
 class NetworkPlugin:
@@ -189,6 +210,9 @@ class NetworkPlugin:
         self.snmp_v3_auth_pass = os.environ.get("NETWORK_SNMP_V3_AUTH_PASS", "")
         self.snmp_v3_priv_proto = os.environ.get("NETWORK_SNMP_V3_PRIV_PROTO", "AES")
         self.snmp_v3_priv_pass = os.environ.get("NETWORK_SNMP_V3_PRIV_PASS", "")
+        # The environment values above are the fallback when the secrets store
+        # has no value (see _refresh_snmp_secrets).
+        self._snmp_env = {attr: getattr(self, attr) for attr in _SNMP_SECRET_KEYS}
         self.sink_telegraf = os.environ.get("NETWORK_SINK_TELEGRAF", "1") == "1"
         self.sink_postgres = os.environ.get("NETWORK_SINK_POSTGRES", "1") == "1"
         self.sink_neo4j = os.environ.get("NETWORK_SINK_NEO4J", "1") == "1"
@@ -369,6 +393,30 @@ class NetworkPlugin:
         return list(await asyncio.gather(*[_probe(h) for h in hosts]))
 
     # ── SNMP (v2c / v3; system + rich interfaces + host-resources + ARP) ──────
+    async def _refresh_snmp_secrets(self) -> None:
+        """Load the SNMP credentials for this scan: the plugin's secret wins,
+        else the environment value. Called before every scan, so a credential
+        changed in the secrets store applies on the next cycle. A secret the host
+        cannot serve (no secrets capability, a call without a tenant, a store
+        error) falls back to the environment; only the error type is logged."""
+        has_secrets = self.ctx.has(CAP_SECRETS_READ)
+        for attr, key in _SNMP_SECRET_KEYS.items():
+            value: Optional[str] = None
+            if has_secrets:
+                try:
+                    value = await self.ctx.secrets.get(key)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # never let a secret lookup fail a scan
+                    # Log neither the value nor the key name (CodeQL treats the
+                    # name as sensitive); the error type is enough to diagnose.
+                    logger.debug(
+                        "network: an SNMP secret is unavailable (%s); "
+                        "using the environment",
+                        type(exc).__name__,
+                    )
+            setattr(self, attr, value if value else self._snmp_env[attr])
+
     def _snmp_base_args(self) -> List[str]:
         """Version-specific snmp CLI args (before the -O flags / host / oid)."""
         if self.snmp_version == "3":
@@ -521,6 +569,7 @@ class NetworkPlugin:
             else await self._tcp_fallback(hosts)
         )
         if self.snmp_enabled and shutil.which("snmpget") is not None:
+            await self._refresh_snmp_secrets()
             live = [h for h in discovered if h.get("state") == "up" or h.get("ports")]
             sem = asyncio.Semaphore(_SNMP_MAX_CONCURRENCY)
 
