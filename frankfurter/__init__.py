@@ -19,12 +19,15 @@ __all__ = ["FrankfurterPlugin"]
 
 logger = logging.getLogger("minder.plugin.frankfurter")
 
-_API = "https://api.frankfurter.app"
+# The API moved from api.frankfurter.app to api.frankfurter.dev/v1; the old host
+# now answers 301. Redirects are deliberately NOT followed (the declared EGRESS
+# host is the only place this plugin may connect), so call the new base directly.
+_API = "https://api.frankfurter.dev/v1"
 
 
 class FrankfurterPlugin(PluginBase):
     # Where this plugin connects (contract-v2 EGRESS declaration).
-    EGRESS = ["api.frankfurter.app"]
+    EGRESS = ["api.frankfurter.dev"]
     # The time-series measurement this plugin writes (its platform scope).
     TIMESERIES = {"measurements": ["fx_rate"]}
 
@@ -115,7 +118,7 @@ class FrankfurterPlugin(PluginBase):
     async def register(self) -> PluginMetadata:
         return PluginMetadata(
             name="frankfurter",
-            version="1.0.0",
+            version="1.0.1",
             description="Keyless ECB foreign-exchange rates + a convert tool.",
             author="minderhq",
             capabilities=["collect", "analyze", "fx"],
@@ -128,7 +131,9 @@ class FrankfurterPlugin(PluginBase):
         if symbols:
             params["to"] = ",".join(symbols)
         try:
-            async with httpx.AsyncClient(timeout=self.http_timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.http_timeout, follow_redirects=False
+            ) as client:
                 resp = await client.get(f"{_API}/latest", params=params)
                 resp.raise_for_status()
                 body = resp.json() or {}

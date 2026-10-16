@@ -154,7 +154,7 @@
     {
       "package": "frankfurter",
       "name": "frankfurter",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "Keyless ECB foreign-exchange rates + a convert tool.",
       "author": "minderhq",
       "capabilities": [
@@ -247,7 +247,7 @@
       "runner_group": "trusted",
       "contract_version": 1,
       "egress": [
-        "api.frankfurter.app"
+        "api.frankfurter.dev"
       ],
       "manages": [],
       "timeseries": [

@@ -21,7 +21,8 @@ def _client(payload, *, raise_on_get=False, capture=None):
 
     class _Client:
         def __init__(self, *a, **k):
-            pass
+            if capture is not None:
+                capture["client_kwargs"] = k
 
         async def __aenter__(self):
             return self
@@ -32,6 +33,9 @@ def _client(payload, *, raise_on_get=False, capture=None):
         async def get(self, url, params=None):
             if raise_on_get:
                 raise RuntimeError("boom")
+            if capture is not None:
+                capture["url"] = url
+                capture["params"] = params
             return _Resp()
 
         async def post(self, url, params=None, headers=None, content=None):
@@ -73,6 +77,24 @@ def test_latest_returns_rates_dict(monkeypatch):
         frankfurter.httpx, "AsyncClient", _client({"rates": {"TRY": 34.2}})
     )
     assert asyncio.run(p._latest("USD", ["TRY"])) == {"TRY": 34.2}
+
+
+def test_latest_calls_the_v1_api_on_the_declared_egress_host(monkeypatch):
+    """The API moved to api.frankfurter.dev/v1 (the old .app host answers 301).
+    Pin the base URL, keep it inside EGRESS, and never follow redirects."""
+    cap = {}
+    p = FrankfurterPlugin()
+    monkeypatch.setattr(
+        frankfurter.httpx,
+        "AsyncClient",
+        _client({"rates": {"EUR": 0.9}}, capture=cap),
+    )
+    assert asyncio.run(p._latest("USD", ["EUR", "TRY"])) == {"EUR": 0.9}
+    assert frankfurter._API == "https://api.frankfurter.dev/v1"
+    assert cap["url"] == "https://api.frankfurter.dev/v1/latest"
+    assert cap["params"] == {"from": "USD", "to": "EUR,TRY"}
+    assert cap["client_kwargs"].get("follow_redirects") is False
+    assert FrankfurterPlugin.EGRESS == ["api.frankfurter.dev"]
 
 
 def test_latest_none_when_rates_not_a_dict(monkeypatch):
