@@ -408,9 +408,11 @@ class NetworkPlugin:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # never let a secret lookup fail a scan
+                    # Log neither the value nor the key name (CodeQL treats the
+                    # name as sensitive); the error type is enough to diagnose.
                     logger.debug(
-                        "network: secret %s unavailable (%s); using the environment",
-                        key,
+                        "network: an SNMP secret is unavailable (%s); "
+                        "using the environment",
                         type(exc).__name__,
                     )
             setattr(self, attr, value if value else self._snmp_env[attr])
