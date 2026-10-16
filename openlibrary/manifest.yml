@@ -1,0 +1,90 @@
+# Declarative (T0) connector manifest for the openlibrary plugin.
+#
+# The same tool as openlibrary/__init__.py, expressed as data: a runner in the
+# `declarative` group hosts this file and never imports the Python package,
+# while the in-process mode keeps running the Python plugin. Keep the two in
+# step (config keys, tool name/parameters and result shapes).
+apiVersion: minder.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: openlibrary
+  version: 1.0.0
+  description: Keyless Open Library book search, exposed as an AI tool.
+  author: minderhq
+spec:
+  runtime: {kind: declarative, engine: 1}
+  display:
+    label: Open Library
+    summary: "Search books on Open Library — a book-lookup tool for the LLM."
+    logo: library
+    color: "#e1dcc5"
+    category: ai-tool
+  config_schema:
+    - key: OPENLIBRARY_MAX_RESULTS
+      type: int
+      default: 5
+      description: "Default number of books to return (1-20)."
+      widget: number
+      group: Search
+  egress:
+    - host: openlibrary.org
+  bases:
+    ol:
+      url: "https://openlibrary.org"
+  limits: {timeout_s: 12}
+  tools:
+    search_books:
+      description: "Search Open Library for books by title, topic, or author. Returns each book's title, authors, first publication year, and URL."
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: "Title, topic, or author, e.g. 'distributed systems' or 'Ursula K. Le Guin'."
+          max_results:
+            type: integer
+            description: "How many books to return (1-20)."
+        required: [query]
+      steps:
+        - name: search
+          foreach: >-
+            {q: trim(params.query), p: params.max_results, c: config.OPENLIBRARY_MAX_RESULTS}
+            | {q: q, p: p, c: (type(c) == 'number' && c == c && c)
+                || (type(c) == 'boolean' && `1`)
+                || (type(c) == 'string' && !contains(lower(c), '.') && !contains(lower(c), 'e') && parse_number(c))
+                || null}
+            | {q: q, n: (p != null && max([`1`, min([floor(p), `20`])]))
+                || (c != null && max([`1`, min([floor(c), `20`])])) || `5`}
+            | [@][?q != '']
+          max_items: 1
+          request:
+            base: ol
+            path: /search.json
+            follow_redirects: false
+            empty_body: error
+            query:
+              q: "{item.q}"
+              limit: "{item.n}"
+              fields: "title,author_name,first_publish_year,key"
+            headers: {User-Agent: minder-openlibrary-plugin}
+      output: >-
+        length(steps.search) == `0` && {error: 'query is required'}
+        || ({query: params.query, b: steps.search[0]}
+            | {query: query, b: ((b == `0` || !b) && [`{}`] || [b])[0]}
+            | {query: query, d: (type(b) != 'object' && length(`5`)) || b.docs}
+            | {query: query, d: ((d == `0` || !d) && [`[]`] || [d])[0]}
+            | {query: query, d: ((type(d) == 'number' || type(d) == 'boolean') && length(`5`)) || (type(d) == 'array' && [d] || [`[]`])[0]}
+            | {query: query, books: d[?type(@) == 'object'].{
+                title: (contains(keys(@), 'title') && [title] || [''])[0],
+                authors: ({v: author_name}
+                  | ((v == `0` || !v) && {v: `[]`} || @)
+                  | ((type(v) == 'number' || type(v) == 'boolean') && length(`5`))
+                    || (type(v) == 'array' && {r: v[?@ && @ != `0`]}
+                        || type(v) == 'object' && {r: keys(v)[?@ != '']}
+                        || {r: chars(v)}).r),
+                first_published: first_publish_year,
+                url: ({v: key}
+                  | ((v == `0` || !v) && {v: ''} || v == `true` && {v: 'True'} || {v: to_string(v)})
+                  | (starts_with(v, '/') && join('', ['https://openlibrary.org', v]) || v))}}
+            | {query: query, count: length(books), books: books})
+      error_output: "error.kind != 'mapping' && {query: params.query, error: 'search unavailable'} || null"

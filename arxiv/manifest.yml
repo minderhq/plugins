@@ -1,0 +1,97 @@
+# Declarative (T0) connector manifest for the arxiv plugin.
+#
+# The same tool as arxiv/__init__.py, expressed as data: a runner in the
+# `declarative` group hosts this file and never imports the Python package,
+# while the in-process mode keeps running the Python plugin. Keep the two in
+# step (config keys, tool name/parameters and result shapes).
+apiVersion: minder.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: arxiv
+  version: 1.0.0
+  description: Keyless arXiv academic-paper search, exposed as an AI tool.
+  author: minderhq
+spec:
+  runtime: {kind: declarative, engine: 1}
+  display:
+    label: arXiv
+    summary: "Search academic papers on arXiv — a research-lookup tool for the LLM."
+    logo: graduation-cap
+    color: "#b31b1b"
+    category: ai-tool
+  config_schema:
+    - key: ARXIV_MAX_RESULTS
+      type: int
+      default: 5
+      description: "Default number of papers to return (1-20)."
+      widget: number
+      group: Search
+  egress:
+    - host: export.arxiv.org
+  bases:
+    arxiv:
+      url: "https://export.arxiv.org/api"
+  limits: {timeout_s: 12}
+  tools:
+    search_papers:
+      description: "Search arXiv for academic papers on a topic. Returns each paper's title, authors, abstract, publication date, and URL."
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: "The research topic or keywords, e.g. 'retrieval augmented generation'."
+          max_results:
+            type: integer
+            description: "How many papers to return (1-20)."
+        required: [query]
+      steps:
+        - name: search
+          foreach: >-
+            {q: trim(params.query), p: params.max_results, c: config.ARXIV_MAX_RESULTS}
+            | {q: q, p: p, c: (type(c) == 'number' && c == c && c)
+                || (type(c) == 'boolean' && `1`)
+                || (type(c) == 'string' && !contains(lower(c), '.') && !contains(lower(c), 'e') && parse_number(c))
+                || null}
+            | {q: join('', ['all:', q]), e: q == '', n: (p != null && max([`1`, min([floor(p), `20`])]))
+                || (c != null && max([`1`, min([floor(c), `20`])])) || `5`}
+            | [@][?!e]
+          max_items: 1
+          request:
+            base: arxiv
+            path: /query
+            response: xml
+            xml: {namespaces: keep, prefixes: {atom: "http://www.w3.org/2005/Atom"}}
+            follow_redirects: false
+            query:
+              search_query: "{item.q}"
+              start: "0"
+              max_results: "{item.n}"
+              sortBy: submittedDate
+              sortOrder: descending
+            headers: {User-Agent: minder-arxiv-plugin}
+      output: >-
+        length(steps.search) == `0` && {error: 'query is required'}
+        || ({query: params.query, r: values(steps.search[0])[0]}
+            | {query: query, e: (type(r) == 'object' && type(r."atom:entry") != 'null' && {v: to_array(r."atom:entry")} || {v: `[]`}).v}
+            | {query: query, papers: map(&({x: @}
+                | {x: x, t: (type(x) == 'object' && {v: to_array(x."atom:title")[0]} || {v: ''}).v,
+                         s: (type(x) == 'object' && {v: to_array(x."atom:summary")[0]} || {v: ''}).v,
+                         p: (type(x) == 'object' && {v: to_array(x."atom:published")[0]} || {v: ''}).v,
+                         i: (type(x) == 'object' && {v: to_array(x."atom:id")[0]} || {v: ''}).v,
+                         a: (type(x) == 'object' && type(x."atom:author") != 'null' && {v: to_array(x."atom:author")} || {v: `[]`}).v}
+                | {t: (type(t) == 'object' && {v: not_null(t."#text", '')} || {v: not_null(t, '')}).v,
+                   s: (type(s) == 'object' && {v: not_null(s."#text", '')} || {v: not_null(s, '')}).v,
+                   p: (type(p) == 'object' && {v: not_null(p."#text", '')} || {v: not_null(p, '')}).v,
+                   i: (type(i) == 'object' && {v: not_null(i."#text", '')} || {v: not_null(i, '')}).v,
+                   a: map(&({y: (type(@) == 'object' && {v: to_array("atom:name")[0]} || {v: ''}).v}
+                       | (type(y) == 'object' && {v: not_null(y."#text", '')} || {v: not_null(y, '')}).v), a)[?@ != '']}
+                | {title: join(' ', words(t)),
+                   authors: a,
+                   summary: substr(join(' ', words(s)), `0`, `600`),
+                   published: substr(p, `0`, `10`),
+                   url: i}), e)}
+            | {query: query, count: length(papers), papers: papers})
+      error_output: >-
+        error.kind == 'parse' && {query: params.query, count: `0`, papers: `[]`}
+        || {query: params.query, error: 'search unavailable'}
