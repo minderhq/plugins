@@ -1,0 +1,154 @@
+# Declarative (T0) connector manifest for the frankfurter plugin.
+#
+# The same surface as frankfurter/__init__.py, expressed as data: a runner in the
+# `declarative` group hosts this file and never imports the Python package,
+# while the in-process mode keeps running the Python plugin. Keep the two in
+# step (config keys, tool/action names and parameters, the hourly collect,
+# the fx_rate time series and result shapes).
+apiVersion: minder.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: frankfurter
+  version: 1.0.1
+  description: Keyless ECB foreign-exchange rates + a convert tool.
+  author: minderhq
+spec:
+  runtime: {kind: declarative, engine: 1}
+  display:
+    label: Exchange Rates
+    summary: ECB foreign-exchange rates as a time series, plus a convert tool.
+    logo: banknote
+    color: "#22c55e"
+    category: data-source
+  config_schema:
+    - key: FX_BASE
+      type: string
+      default: EUR
+      description: Base currency (ISO 4217, e.g. EUR, USD, TRY).
+      widget: text
+      group: Rates
+    - key: FX_SYMBOLS
+      type: string
+      default: USD,GBP,TRY,JPY
+      description: Comma-separated target currencies to track.
+      widget: textarea
+      rows: 2
+      group: Rates
+    - key: FX_SINK_INFLUXDB
+      type: bool
+      default: true
+      description: Write each collection to InfluxDB as a time series.
+      widget: toggle
+      group: Storage
+  egress:
+    - host: api.frankfurter.dev
+  bases:
+    api:
+      url: https://api.frankfurter.dev/v1
+  limits: {timeout_s: 10}
+  timeseries: {measurements: [fx_rate]}
+  tools:
+    convert:
+      description: Convert an amount from one currency to another (live rate).
+      parameters:
+        type: object
+        properties:
+          amount: {type: number}
+          from_currency: {type: string}
+          to_currency: {type: string}
+        required: [amount, from_currency, to_currency]
+      vars:
+        frm: upper(trim(params.from_currency))
+        to: upper(trim(params.to_currency))
+      steps:
+        - name: rate
+          when: vars.frm != vars.to          # same currency: no request
+          request:
+            base: api
+            path: /latest
+            query: {from: "{vars.frm}", to: "{vars.to}"}
+            follow_redirects: false
+      output: >-
+        vars.frm == vars.to
+        && {amount: params.amount, from: vars.frm, to: vars.to, result: params.amount}
+        || (contains(keys(steps.rate.rates), vars.to)
+            && ((type(get(steps.rate.rates, vars.to)) == 'number'
+                 && {amount: params.amount, from: vars.frm, to: vars.to,
+                     result: multiply(multiply(params.amount, `1.0`),
+                                      get(steps.rate.rates, vars.to))})
+                || (type(get(steps.rate.rates, vars.to)) == 'string'
+                    && parse_number(get(steps.rate.rates, vars.to)) != null
+                    && {amount: params.amount, from: vars.frm, to: vars.to,
+                        result: multiply(multiply(params.amount, `1.0`),
+                                         parse_number(get(steps.rate.rates, vars.to)))})
+                || {error: 'amount must be a number'}))
+        || {error: join('', ['no rate for ', vars.frm, '->', vars.to])}
+      # Any fetch failure (404 unknown code, 422, 5xx, transport, parse,
+      # redirect): the same message the Python plugin returns.
+      error_output: >-
+        {error: join('', ['no rate for ', upper(trim(params.from_currency)), '->',
+                          upper(trim(params.to_currency))])}
+  actions:
+    refresh:
+      description: Force an immediate re-collection (same as the hourly loop).
+      vars:
+        base: upper(trim(config.FX_BASE || 'EUR'))
+        symbols: >-
+          length(split(upper(config.FX_SYMBOLS || ''), ',')) > `0`
+          && join(',', split(upper(config.FX_SYMBOLS || ''), ',')) || null
+      steps:
+        - name: latest
+          request:
+            base: api
+            path: /latest
+            query: {from: "{vars.base}", to: "{vars.symbols}"}
+            follow_redirects: false
+      timeseries:
+        measurement: fx_rate
+        points: >-
+          type(steps.latest.rates) == 'object'
+          && contains(['1', 'true', 'yes', 'on'], lower(to_string(config.FX_SINK_INFLUXDB)))
+          && entries(steps.latest.rates)[?type(value) == 'number'].{
+               tags: {quote: key}, fields: {rate: multiply(value, `1.0`)}}
+          || `[]`
+        tags: {base: vars.base}
+      output: >-
+        {base: vars.base,
+         rates: type(steps.latest.rates) == 'object' && steps.latest.rates || `{}`,
+         influxdb_written: timeseries.written > `0`,
+         collected_at: now}
+      error_output: >-
+        {base: upper(trim(config.FX_BASE || 'EUR')), rates: `{}`,
+         influxdb_written: `false`, collected_at: now}
+  schedule:
+    cron: "0 * * * *"
+    vars:
+      base: upper(trim(config.FX_BASE || 'EUR'))
+      symbols: >-
+        length(split(upper(config.FX_SYMBOLS || ''), ',')) > `0`
+        && join(',', split(upper(config.FX_SYMBOLS || ''), ',')) || null
+    steps:
+      - name: latest
+        request:
+          base: api
+          path: /latest
+          query: {from: "{vars.base}", to: "{vars.symbols}"}
+          follow_redirects: false
+    measurement: fx_rate
+    points: >-
+      type(steps.latest.rates) == 'object'
+      && contains(['1', 'true', 'yes', 'on'], lower(to_string(config.FX_SINK_INFLUXDB)))
+      && entries(steps.latest.rates)[?type(value) == 'number'].{
+           tags: {quote: key}, fields: {rate: multiply(value, `1.0`)}}
+      || `[]`
+    tags: {base: vars.base}
+    # The collect result, shaped as Python's collect_data (refresh = collect).
+    output: >-
+      {base: vars.base,
+       rates: type(steps.latest.rates) == 'object' && steps.latest.rates || `{}`,
+       influxdb_written: timeseries.written > `0`,
+       collected_at: now}
+    # An upstream failure is an empty success there, never a raise.
+    error_output: >-
+      {base: upper(trim(config.FX_BASE || 'EUR')), rates: `{}`,
+       influxdb_written: `false`, collected_at: now}
