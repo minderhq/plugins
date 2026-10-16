@@ -1,0 +1,60 @@
+# Declarative (T0) connector manifest for the wikipedia plugin.
+#
+# The same tool as wikipedia/__init__.py, expressed as data: a runner in the
+# `declarative` group hosts this file and never imports the Python package,
+# while the in-process mode keeps running the Python plugin. Keep the two in
+# step (config keys, tool name/parameters and result shapes).
+apiVersion: minder.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: wikipedia
+  version: 1.0.0
+  description: Keyless Wikipedia article-summary lookup, exposed as an AI tool.
+  author: minderhq
+spec:
+  runtime: {kind: declarative, engine: 1}
+  display:
+    label: Wikipedia
+    summary: "Look up a factual article summary — an ask-Wikipedia tool for the LLM."
+    logo: book-open
+    color: "#636466"
+    category: ai-tool
+  config_schema:
+    - key: WIKI_LANG
+      type: string
+      default: en
+      description: "Wikipedia language subdomain (e.g. 'en', 'tr', 'de')."
+      widget: text
+      group: Lookup
+  egress:
+    - host: "*.wikipedia.org"
+  bases:
+    wiki:
+      url: "https://{config.WIKI_LANG|en}.wikipedia.org/api/rest_v1"
+  limits: {timeout_s: 10}
+  tools:
+    wiki_summary:
+      description: "Look up a short factual summary of a topic from Wikipedia (title, extract, and the article URL)."
+      parameters:
+        type: object
+        properties:
+          topic:
+            type: string
+            description: "What to look up, e.g. 'Alan Turing', 'RAG'."
+        required: [topic]
+      steps:
+        - name: summary
+          # one-element fan-out = a computed path value (trim + spaces->_);
+          # a blank topic yields no request at all.
+          foreach: "[replace(trim(params.topic), ' ', '_')][?@ != '']"
+          max_items: 1
+          request:
+            base: wiki
+            path: "/page/summary/{item}"
+            headers: {User-Agent: minder-wikipedia-plugin}
+      output: >-
+        length(steps.summary) == `0` && {error: 'topic is required'}
+        || (steps.summary[0].extract && {title: not_null(steps.summary[0].title, params.topic),
+        extract: steps.summary[0].extract, url: not_null(steps.summary[0].content_urls.desktop.page, '')}
+        || {topic: params.topic, error: 'no summary found'})
+      error_output: "{topic: params.topic, error: 'lookup unavailable'}"
