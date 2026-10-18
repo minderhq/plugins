@@ -124,6 +124,9 @@ class TefasPlugin:
             },
             "action": "get_fund_price",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["www.tefas.gov.tr"],
         },
     ]
 

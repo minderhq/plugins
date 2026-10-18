@@ -73,6 +73,9 @@ class HackerNewsPlugin(PluginBase):
             },
             "action": "top_stories",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["hacker-news.firebaseio.com"],
         },
     ]
 

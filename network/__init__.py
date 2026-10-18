@@ -169,6 +169,11 @@ class NetworkPlugin:
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
             "action": "scan",
+            # Discover-only: probes the operator-configured targets (nmap/SNMP gets)
+            # and caches the result in memory; it writes to no store. No `hosts`:
+            # the targets are config (NETWORK_SCAN_TARGETS), not code.
+            "effect": "read",
+            "idempotent": True,
         },
         {
             "name": "network_reconcile",
@@ -178,6 +183,14 @@ class NetworkPlugin:
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
             "action": "reconcile",
+            # Rewrites + reloads the telegraf managed region, upserts the
+            # inventory/graph, publishes change events, and DELETEs stale-down
+            # inventory rows and prunes graph nodes past the retention window --
+            # the deletions make it destructive. Not idempotent: change events
+            # and pruning depend on the previous cycle and the clock. No `hosts`:
+            # the scan targets and backend URLs are config, not code.
+            "effect": "destructive",
+            "idempotent": False,
         },
     ]
 

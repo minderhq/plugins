@@ -81,6 +81,7 @@ class ArxivPlugin(PluginBase):
                 "properties": {
                     "query": {
                         "type": "string",
+                        "sensitivity": "free_text",
                         "description": (
                             "The research topic or keywords, e.g. "
                             "'retrieval augmented generation'."
@@ -95,6 +96,9 @@ class ArxivPlugin(PluginBase):
             },
             "action": "search_papers",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["export.arxiv.org"],
         },
     ]
 

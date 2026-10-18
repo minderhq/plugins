@@ -73,6 +73,7 @@ class WikipediaPlugin(PluginBase):
                 "properties": {
                     "topic": {
                         "type": "string",
+                        "sensitivity": "free_text",
                         "description": "What to look up, e.g. 'Alan Turing', 'RAG'.",
                     },
                 },
@@ -80,6 +81,9 @@ class WikipediaPlugin(PluginBase):
             },
             "action": "wiki_summary",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["*.wikipedia.org"],
         },
     ]
 

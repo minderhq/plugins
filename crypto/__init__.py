@@ -122,6 +122,9 @@ class CryptoPlugin:
             },
             "action": "get_price",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["query1.finance.yahoo.com"],
         },
     ]
 

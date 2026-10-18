@@ -83,7 +83,7 @@ class FrankfurterPlugin(PluginBase):
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "amount": {"type": "number"},
+                    "amount": {"type": "number", "sensitivity": "amount"},
                     "from_currency": {"type": "string"},
                     "to_currency": {"type": "string"},
                 },
@@ -91,6 +91,9 @@ class FrankfurterPlugin(PluginBase):
             },
             "action": "convert",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["api.frankfurter.dev"],
         },
     ]
 
