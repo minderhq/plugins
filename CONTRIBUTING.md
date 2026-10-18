@@ -4,7 +4,11 @@
    or `minder-plugin scaffold <name>`.
 2. Add it as `<name>/__init__.py`, importing from `minder_plugin_sdk`. Declare a
    `register()` returning `PluginMetadata`, and any of `CONFIG_SCHEMA` / `ACTIONS`
-   / `AI_TOOLS` / `DISPLAY` / `REQUIRES` you need.
+   / `AI_TOOLS` / `DISPLAY` / `REQUIRES` you need. Every `AI_TOOLS` entry
+   declares its `effect` (`read` / `write` / `send` / `destructive`), and
+   `idempotent` / `hosts` / argument `sensitivity` where they apply (see the
+   SDK README, "Tool effects"). `tests/test_tool_effects.py` fails on a tool
+   with no effect or one its name, method or arguments contradict.
 3. Validate locally:
    ```bash
    pip install -e ".[dev]"

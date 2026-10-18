@@ -132,6 +132,11 @@ class PortfolioPlugin:
             # from the JWT, never supplied by the model/caller.
             "parameters": {"type": "object", "properties": {}, "required": []},
             "action": "get_value",
+            # Reads the caller's own series back from the platform time-series
+            # store; it makes no outbound connection, hence `hosts: []`.
+            "effect": "read",
+            "idempotent": True,
+            "hosts": [],
         },
     ]
 

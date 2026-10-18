@@ -80,6 +80,7 @@ class OpenLibraryPlugin(PluginBase):
                 "properties": {
                     "query": {
                         "type": "string",
+                        "sensitivity": "free_text",
                         "description": (
                             "Title, topic, or author, e.g. "
                             "'distributed systems' or 'Ursula K. Le Guin'."
@@ -94,6 +95,9 @@ class OpenLibraryPlugin(PluginBase):
             },
             "action": "search_books",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["openlibrary.org"],
         },
     ]
 

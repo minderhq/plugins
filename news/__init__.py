@@ -182,6 +182,10 @@ class NewsPlugin:
             },
             "action": "get_news",
             "method": "GET",
+            # No `hosts`: it reads the operator-configured NEWS_FEEDS URLs, so the
+            # reachable hosts are config, not code (covered by EGRESS = "public").
+            "effect": "read",
+            "idempotent": True,
         },
     ]
 

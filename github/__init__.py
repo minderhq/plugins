@@ -101,6 +101,9 @@ class GitHubPlugin(PluginBase):
             },
             "action": "get_repo_stats",
             "method": "GET",
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["api.github.com"],
         },
     ]
 

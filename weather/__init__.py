@@ -87,6 +87,7 @@ class WeatherPlugin:
                 "properties": {
                     "location": {
                         "type": "string",
+                        "sensitivity": "free_text",
                         "description": "City name, e.g. 'Istanbul', 'Tokyo', 'Berlin'.",
                     },
                 },
@@ -94,6 +95,11 @@ class WeatherPlugin:
             },
             "action": "get_weather",
             "method": "GET",
+            # The default hosts; an operator can repoint them with WEATHER_API_BASE /
+            # WEATHER_GEOCODE_BASE (env only, not a tool argument).
+            "effect": "read",
+            "idempotent": True,
+            "hosts": ["geocoding-api.open-meteo.com", "api.open-meteo.com"],
         },
     ]
 
