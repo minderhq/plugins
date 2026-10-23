@@ -16,15 +16,15 @@ Every plugin lives in its own top-level directory as a package:
 ## How it reaches a running Minder
 
 The plugin-registry **discovers and loads module plugins on startup** and lists
-them at `/v1/plugins`. By design nothing runs arbitrary code — a plugin is fixed
-handlers (or a declarative manifest), never uploaded code.
+them at `/v1/plugins`. A plugin is either reviewed Python
+code, merged to this catalog by pull request, or a declarative manifest that runs
+no plugin code. Both run isolated, out of process, in a `plugin-runner`; no
+user-uploaded code runs. AI tools declare an `effect`, and write/send/destructive
+ones pause for user approval.
 
-> **Status:** wired. This catalog is vendored into `minderhq/minder` as a git
-> submodule (`src/plugins_catalog/`); its Dockerfile merges every plugin here
-> into the running plugin-registry at build time.
-> `network`/`telegraf` (Minder's own first-party infra plugins) moved here
-> too, so this repo is now the single source for every plugin — first-party
-> and community alike, no plugin duplicated between the two repos.
+> **Status:** wired. This catalog is built into the Minder plugin-registry, and
+> this repo is the single source for every plugin, first-party and community
+> alike.
 
 ## Contributing a plugin
 

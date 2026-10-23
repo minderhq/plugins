@@ -2,7 +2,7 @@
 #
 # The same surface as frankfurter/__init__.py, expressed as data: a runner in the
 # `declarative` group hosts this file and never imports the Python package,
-# while the in-process mode keeps running the Python plugin. Keep the two in
+# while the code plugin keeps running the Python package in a runner. Keep the two in
 # step (config keys, tool/action names and parameters, the hourly collect,
 # the fx_rate time series and result shapes).
 apiVersion: minder.dev/v1alpha1
