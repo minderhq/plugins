@@ -16,7 +16,7 @@ py-modules = []
 [project.optional-dependencies]
 dev = [
     # Pinned past v0.1.0 to a specific commit (not a new tag -- this repo's
-    # own CHANGELOG: no routine version bumps pre-1.0). a310db94 is plugin-sdk
+    # own CHANGELOG: no routine version bumps pre-1.0). 0919ce8c is plugin-sdk
     # #52 (manifest schemas): the declarative connector schema
     # tests/test_manifest_schemas.py checks every manifest.yml against, and
     # the full manifest-plugin trigger/action set. It builds on #50 (tool
@@ -24,7 +24,7 @@ dev = [
     # checked by `minder-plugin validate`), #43 (platform context, contract
     # v2) and the package-style plugin validate/inspect fix `network` needs
     # (#26). The jsonschema/yaml extras give full schema validation.
-    "minder-plugin-sdk[jsonschema,yaml] @ git+https://github.com/minderhq/plugin-sdk@a310db94a006745d55a91dda65bc6434b9564cb2",
+    "minder-plugin-sdk[jsonschema,yaml] @ git+https://github.com/minderhq/plugin-sdk@0919ce8ca4a01934bbcabe3cddf000b00d60b5e9",
     "httpx>=0.27",
     "defusedxml>=0.7",
     "pytest>=8",
