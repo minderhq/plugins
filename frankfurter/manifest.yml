@@ -50,6 +50,9 @@ spec:
   tools:
     convert:
       description: Convert an amount from one currency to another (live rate).
+      # A pure lookup, declared like the Python plugin's tool: undeclared, its
+      # amount argument would make the analysis treat it as a write.
+      effect: read
       parameters:
         type: object
         properties:
