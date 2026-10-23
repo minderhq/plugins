@@ -16,15 +16,15 @@ py-modules = []
 [project.optional-dependencies]
 dev = [
     # Pinned past v0.1.0 to a specific commit (not a new tag -- this repo's
-    # own CHANGELOG: no routine version bumps pre-1.0). f44873fc is plugin-sdk
-    # #50 (tool effect classes): the AI_TOOLS `effect`, `idempotent`,
-    # per-argument `sensitivity` and `hosts` fields, which `minder-plugin
-    # validate` checks (errors on invalid values, warnings on a missing or
-    # contradicted effect). It builds on plugin-sdk #43 (platform context,
-    # contract v2: self.ctx / bind_context, the CONTRACT_VERSION / MANAGES /
-    # EGRESS / TIMESERIES declarations, FakePlatformContext) and still carries
-    # the package-style plugin validate/inspect fix `network` needs (#26).
-    "minder-plugin-sdk @ git+https://github.com/minderhq/plugin-sdk@f44873fcada50f17cc38d26089837d4d1a6227ec",
+    # own CHANGELOG: no routine version bumps pre-1.0). 0919ce8c is plugin-sdk
+    # #52 (manifest schemas): the declarative connector schema
+    # tests/test_manifest_schemas.py checks every manifest.yml against, and
+    # the full manifest-plugin trigger/action set. It builds on #50 (tool
+    # effect classes: AI_TOOLS `effect`, `idempotent`, `sensitivity`, `hosts`,
+    # checked by `minder-plugin validate`), #43 (platform context, contract
+    # v2) and the package-style plugin validate/inspect fix `network` needs
+    # (#26). The jsonschema/yaml extras give full schema validation.
+    "minder-plugin-sdk[jsonschema,yaml] @ git+https://github.com/minderhq/plugin-sdk@0919ce8ca4a01934bbcabe3cddf000b00d60b5e9",
     "httpx>=0.27",
     "defusedxml>=0.7",
     "pytest>=8",
